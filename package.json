@@ -1,0 +1,449 @@
+{
+  "name": "cmake-workflow",
+  "displayName": "CMakeWorkflow",
+  "description": "CMake workflow orchestration, profiling and experiment management",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "cmakeWorkflow.selectWorkflow",
+        "title": "CMakeWorkflow: Select Workflow",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "cmakeWorkflow.planWorkflow",
+        "title": "CMakeWorkflow: Plan Workflow",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "cmakeWorkflow.showWorkflowGraph",
+        "title": "CMakeWorkflow: Show Workflow Graph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "cmakeWorkflow.runWorkflow",
+        "title": "CMakeWorkflow: Run Workflow",
+        "icon": "$(play)"
+      },
+      {
+        "command": "cmakeWorkflow.runNode",
+        "title": "CMakeWorkflow: Run Node and Dependencies",
+        "icon": "$(play)"
+      },
+      {
+        "command": "cmakeWorkflow.openLastReport",
+        "title": "CMakeWorkflow: Open Last Report",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "cmakeWorkflow.showHistory",
+        "title": "CMakeWorkflow: Show History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "cmakeWorkflow.historyTrend",
+        "title": "CMakeWorkflow: Show History Trend",
+        "icon": "$(graph-line)"
+      },
+      {
+        "command": "cmakeWorkflow.selectHistoryWorkspace",
+        "title": "CMakeWorkflow: Select History Workspace",
+        "icon": "$(root-folder)"
+      },
+      {
+        "command": "cmakeWorkflow.chooseHistoryDb",
+        "title": "CMakeWorkflow: Choose History Database",
+        "icon": "$(database)"
+      },
+      {
+        "command": "cmakeWorkflow.filterHistory",
+        "title": "CMakeWorkflow: Filter History",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "cmakeWorkflow.importHistory",
+        "title": "CMakeWorkflow: Import Saved Results",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "cmakeWorkflow.toolingDoctor",
+        "title": "CMakeWorkflow: Check Tools",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "cmakeWorkflow.inspectBuildTree",
+        "title": "CMakeWorkflow: Inspect Build Tree",
+        "icon": "$(search)"
+      },
+      {
+        "command": "cmakeWorkflow.resolveTarget",
+        "title": "CMakeWorkflow: Resolve Executable Target",
+        "icon": "$(target)"
+      },
+      {
+        "command": "cmakeWorkflow.openProfileResults",
+        "title": "CMakeWorkflow: Open Profile Results",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "cmakeWorkflow.historyDetails",
+        "title": "CMakeWorkflow: Run Details"
+      },
+      {
+        "command": "cmakeWorkflow.pickBaseline",
+        "title": "CMakeWorkflow: Choose Baseline"
+      },
+      {
+        "command": "cmakeWorkflow.pickCandidate",
+        "title": "CMakeWorkflow: Choose Candidate"
+      },
+      {
+        "command": "cmakeWorkflow.setBaseline",
+        "title": "CMakeWorkflow: Set as Baseline",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "cmakeWorkflow.setCandidate",
+        "title": "CMakeWorkflow: Set as Candidate",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "cmakeWorkflow.compareHistory",
+        "title": "CMakeWorkflow: Compare Runs",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "cmakeWorkflow.detectRegression",
+        "title": "CMakeWorkflow: Detect Regression",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "cmakeWorkflow.selectChartPreset",
+        "title": "CMakeWorkflow: Select Chart Preset",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "cmakeWorkflow.createChartPreset",
+        "title": "CMakeWorkflow: Create Chart Preset",
+        "icon": "$(add)"
+      },
+      {
+        "command": "cmakeWorkflow.compareDagFlowHarness",
+        "title": "CMakeWorkflow: Compare DagFlow Harness Results",
+        "icon": "$(graph-scatter)"
+      },
+      {
+        "command": "cmakeWorkflow.configureCli",
+        "title": "CMakeWorkflow: Choose CLI Executable",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "cmakeWorkflow.openArtifact",
+        "title": "CMakeWorkflow: Open Artifact"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cmakeWorkflow",
+          "title": "CMakeWorkflow",
+          "icon": "resources/workflow.svg"
+        }
+      ]
+    },
+    "views": {
+      "cmakeWorkflow": [
+        {
+          "id": "cmakeWorkflow.workflows",
+          "name": "Workflow"
+        },
+        {
+          "id": "cmakeWorkflow.history",
+          "name": "History & Comparison"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "cmakeWorkflow.workflows",
+        "contents": "Choose a workflow JSON manifest to get started.\n[Select Workflow](command:cmakeWorkflow.selectWorkflow)\n[Choose CLI Executable](command:cmakeWorkflow.configureCli)"
+      },
+      {
+        "view": "cmakeWorkflow.history",
+        "contents": "Load indexed runs, then select a baseline and candidate.\n[Refresh History](command:cmakeWorkflow.showHistory)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "cmakeWorkflow.selectWorkflow",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@1"
+        },
+        {
+          "command": "cmakeWorkflow.planWorkflow",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@2"
+        },
+        {
+          "command": "cmakeWorkflow.showWorkflowGraph",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@2.5"
+        },
+        {
+          "command": "cmakeWorkflow.runWorkflow",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@3"
+        },
+        {
+          "command": "cmakeWorkflow.openLastReport",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@4"
+        },
+        {
+          "command": "cmakeWorkflow.showHistory",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@5"
+        },
+        {
+          "command": "cmakeWorkflow.configureCli",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@6"
+        },
+        {
+          "command": "cmakeWorkflow.showHistory",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@1"
+        },
+        {
+          "command": "cmakeWorkflow.historyTrend",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@2.5"
+        },
+        {
+          "command": "cmakeWorkflow.selectHistoryWorkspace",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@1.5"
+        },
+        {
+          "command": "cmakeWorkflow.chooseHistoryDb",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@1.6"
+        },
+        {
+          "command": "cmakeWorkflow.compareHistory",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@2"
+        },
+        {
+          "command": "cmakeWorkflow.detectRegression",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@3"
+        },
+        {
+          "command": "cmakeWorkflow.compareDagFlowHarness",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@4"
+        },
+        {
+          "command": "cmakeWorkflow.selectChartPreset",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@5"
+        },
+        {
+          "command": "cmakeWorkflow.createChartPreset",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@6"
+        },
+        {
+          "command": "cmakeWorkflow.filterHistory",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@1.7"
+        },
+        {
+          "command": "cmakeWorkflow.importHistory",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@1.8"
+        },
+        {
+          "command": "cmakeWorkflow.openProfileResults",
+          "when": "view == cmakeWorkflow.history",
+          "group": "navigation@7"
+        },
+        {
+          "command": "cmakeWorkflow.toolingDoctor",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@7"
+        },
+        {
+          "command": "cmakeWorkflow.inspectBuildTree",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@8"
+        },
+        {
+          "command": "cmakeWorkflow.resolveTarget",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "navigation@9"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "cmakeWorkflow.runNode",
+          "when": "view == cmakeWorkflow.workflows && viewItem == cmakeWorkflowNode",
+          "group": "inline@1"
+        },
+        {
+          "command": "cmakeWorkflow.setBaseline",
+          "when": "view == cmakeWorkflow.history && viewItem == cmakeWorkflowHistoryRun",
+          "group": "inline@1"
+        },
+        {
+          "command": "cmakeWorkflow.setCandidate",
+          "when": "view == cmakeWorkflow.history && viewItem == cmakeWorkflowHistoryRun",
+          "group": "inline@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CMakeWorkflow",
+      "properties": {
+        "cmakeWorkflow.executable": {
+          "type": "string",
+          "default": "CMakeWorkflow",
+          "scope": "resource",
+          "description": "CLI executable on the workspace host (use dotnet for development)."
+        },
+        "cmakeWorkflow.prefixArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "description": "Arguments before the CLI command, for example a path to CMakeWorkflow.dll."
+        },
+        "cmakeWorkflow.jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "scope": "resource",
+          "description": "Optional --jobs value for workflow run."
+        },
+        "cmakeWorkflow.historyDb": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional CLI history database path. Relative paths resolve from the workspace folder."
+        },
+        "cmakeWorkflow.resultsDir": {
+          "type": "string",
+          "scope": "resource",
+          "description": "Optional --results-dir for workflow run, interpreted by the CLI in the workspace folder."
+        },
+        "cmakeWorkflow.chartPresets": {
+          "type": "array",
+          "default": [],
+          "scope": "resource",
+          "description": "Custom chart filters for CLI history or DagFlow harness results. Create one from the History toolbar or edit this setting.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label",
+              "source",
+              "metrics",
+              "cases"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "history",
+                  "dagflow"
+                ]
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "cmakeWorkflow.autoPresentResults": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "After a completed workflow, open indexed measurements or automatically compare against an earlier CLI-compatible run. Never guesses comparability."
+        },
+        "cmakeWorkflow.autoProfileRegressions": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Opt-in: after a CLI-confirmed statistically significant process wall-time regression, profile a preserved exact direct-run executable with matching argv and SHA-256. Does not profile CMake invoke/UTILITY targets."
+        },
+        "cmakeWorkflow.regressionMinimumEffectPercent": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 100,
+          "default": 5,
+          "scope": "resource",
+          "description": "Practical effect threshold (percent) for optional automatic regression profiling. Holm-adjusted one-sided permutation test is also required."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "npm run compile-tests && node --test out/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.140.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "typescript-eslint": "^8.61.1",
+    "eslint": "^10.5.0",
+    "esbuild": "^0.28.1",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^6.0.3",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
