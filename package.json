@@ -151,6 +151,126 @@
       {
         "command": "cmakeWorkflow.openArtifact",
         "title": "CMakeWorkflow: Open Artifact"
+      },
+      {
+        "command": "cmakeWorkflow.profileRun",
+        "title": "CMakeWorkflow: Run Profile",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "cmakeWorkflow.profileReplay",
+        "title": "CMakeWorkflow: Replay Profile Comparison",
+        "icon": "$(debug-rerun)"
+      },
+      {
+        "command": "cmakeWorkflow.profileAnalyze",
+        "title": "CMakeWorkflow: Analyze Saved Profile",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "cmakeWorkflow.profileVariants",
+        "title": "CMakeWorkflow: Profile Multiple Build Variants",
+        "icon": "$(layers)"
+      },
+      {
+        "command": "cmakeWorkflow.targetBuild",
+        "title": "CMakeWorkflow: Build CMake Target",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "cmakeWorkflow.targetInvoke",
+        "title": "CMakeWorkflow: Invoke CMake Target",
+        "icon": "$(play)"
+      },
+      {
+        "command": "cmakeWorkflow.targetRun",
+        "title": "CMakeWorkflow: Build and Run CMake Target",
+        "icon": "$(run)"
+      },
+      {
+        "command": "cmakeWorkflow.runSequence",
+        "title": "CMakeWorkflow: Run Two-Target Sequence",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "cmakeWorkflow.toolingPlan",
+        "title": "CMakeWorkflow: Plan Tool Installation",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "cmakeWorkflow.toolingSetup",
+        "title": "CMakeWorkflow: Install Tools from Plan",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "cmakeWorkflow.mutationRun",
+        "title": "CMakeWorkflow: Run DagFlow Mutation Campaign",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "cmakeWorkflow.weakMemoryRun",
+        "title": "CMakeWorkflow: Run DagFlow Weak-Memory Campaign",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "cmakeWorkflow.fuzzSeed",
+        "title": "CMakeWorkflow: Generate DagFlow Fuzz Seeds",
+        "icon": "$(add)"
+      },
+      {
+        "command": "cmakeWorkflow.fuzzRun",
+        "title": "CMakeWorkflow: Run DagFlow Fuzz Campaign",
+        "icon": "$(run)"
+      },
+      {
+        "command": "cmakeWorkflow.fuzzTriage",
+        "title": "CMakeWorkflow: Triage DagFlow Fuzz Run",
+        "icon": "$(search)"
+      },
+      {
+        "command": "cmakeWorkflow.fuzzMerge",
+        "title": "CMakeWorkflow: Merge DagFlow Fuzz Corpus",
+        "icon": "$(combine)"
+      },
+      {
+        "command": "cmakeWorkflow.openCampaignArtifact",
+        "title": "CMakeWorkflow: Open Campaign Report or Log",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "cmakeWorkflow.runSelectedNodes",
+        "title": "CMakeWorkflow: Run Selected Nodes and Dependencies",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "cmakeWorkflow.setHistoryLimit",
+        "title": "CMakeWorkflow: Set History Run Limit",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "cmakeWorkflow.toggleHistoryRecording",
+        "title": "CMakeWorkflow: Toggle History Recording",
+        "icon": "$(database)"
+      },
+      {
+        "command": "cmakeWorkflow.historyMetrics",
+        "title": "CMakeWorkflow: Inspect Run Measurements",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "cmakeWorkflow.hostDoctor",
+        "title": "CMakeWorkflow: Host Doctor (IPC Preview)",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "cmakeWorkflow.stopHost",
+        "title": "CMakeWorkflow: Stop Local Host",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "cmakeWorkflow.hostFix",
+        "title": "CMakeWorkflow: Fix Tools (Host)",
+        "icon": "$(wrench)"
       }
     ],
     "viewsContainers": {
@@ -295,6 +415,61 @@
           "command": "cmakeWorkflow.resolveTarget",
           "when": "view == cmakeWorkflow.workflows",
           "group": "navigation@9"
+        },
+        {
+          "command": "cmakeWorkflow.profileRun",
+          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
+          "group": "profiling@1"
+        },
+        {
+          "command": "cmakeWorkflow.profileReplay",
+          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
+          "group": "profiling@2"
+        },
+        {
+          "command": "cmakeWorkflow.profileAnalyze",
+          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
+          "group": "profiling@3"
+        },
+        {
+          "command": "cmakeWorkflow.profileVariants",
+          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
+          "group": "profiling@10"
+        },
+        {
+          "submenu": "cmakeWorkflow.targetsMenu",
+          "when": "view == cmakeWorkflow.workflows || view == cmakeWorkflow.history",
+          "group": "actions@1"
+        },
+        {
+          "submenu": "cmakeWorkflow.toolsMenu",
+          "when": "view == cmakeWorkflow.workflows || view == cmakeWorkflow.history",
+          "group": "actions@2"
+        },
+        {
+          "submenu": "cmakeWorkflow.campaignsMenu",
+          "when": "view == cmakeWorkflow.workflows || view == cmakeWorkflow.history",
+          "group": "actions@3"
+        },
+        {
+          "command": "cmakeWorkflow.runSelectedNodes",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "workflows@10"
+        },
+        {
+          "command": "cmakeWorkflow.setHistoryLimit",
+          "when": "view == cmakeWorkflow.history",
+          "group": "history@10"
+        },
+        {
+          "command": "cmakeWorkflow.toggleHistoryRecording",
+          "when": "view == cmakeWorkflow.history",
+          "group": "history@10"
+        },
+        {
+          "command": "cmakeWorkflow.historyMetrics",
+          "when": "view == cmakeWorkflow.history",
+          "group": "history@10"
         }
       ],
       "view/item/context": [
@@ -312,6 +487,76 @@
           "command": "cmakeWorkflow.setCandidate",
           "when": "view == cmakeWorkflow.history && viewItem == cmakeWorkflowHistoryRun",
           "group": "inline@2"
+        }
+      ],
+      "cmakeWorkflow.targetsMenu": [
+        {
+          "command": "cmakeWorkflow.targetBuild",
+          "group": "actions@0"
+        },
+        {
+          "command": "cmakeWorkflow.targetInvoke",
+          "group": "actions@1"
+        },
+        {
+          "command": "cmakeWorkflow.targetRun",
+          "group": "actions@2"
+        },
+        {
+          "command": "cmakeWorkflow.runSequence",
+          "group": "actions@3"
+        }
+      ],
+      "cmakeWorkflow.toolsMenu": [
+        {
+          "command": "cmakeWorkflow.toolingPlan",
+          "group": "actions@0"
+        },
+        {
+          "command": "cmakeWorkflow.toolingSetup",
+          "group": "actions@1"
+        },
+        {
+          "command": "cmakeWorkflow.hostDoctor",
+          "group": "host@1"
+        },
+        {
+          "command": "cmakeWorkflow.stopHost",
+          "group": "host@2"
+        },
+        {
+          "command": "cmakeWorkflow.hostFix",
+          "group": "host@1.5"
+        }
+      ],
+      "cmakeWorkflow.campaignsMenu": [
+        {
+          "command": "cmakeWorkflow.mutationRun",
+          "group": "actions@0"
+        },
+        {
+          "command": "cmakeWorkflow.weakMemoryRun",
+          "group": "actions@1"
+        },
+        {
+          "command": "cmakeWorkflow.fuzzSeed",
+          "group": "actions@2"
+        },
+        {
+          "command": "cmakeWorkflow.fuzzRun",
+          "group": "actions@3"
+        },
+        {
+          "command": "cmakeWorkflow.fuzzTriage",
+          "group": "actions@4"
+        },
+        {
+          "command": "cmakeWorkflow.fuzzMerge",
+          "group": "actions@5"
+        },
+        {
+          "command": "cmakeWorkflow.openCampaignArtifact",
+          "group": "actions@6"
         }
       ]
     },
@@ -412,9 +657,49 @@
           "default": 5,
           "scope": "resource",
           "description": "Practical effect threshold (percent) for optional automatic regression profiling. Holm-adjusted one-sided permutation test is also required."
+        },
+        "cmakeWorkflow.historyLimit": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 2147483647,
+          "scope": "resource",
+          "description": "Maximum number of indexed runs requested from the CLI for History and automatic baseline selection."
+        },
+        "cmakeWorkflow.noHistory": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Pass --no-history for new workflow and profile runs. Saved run reports are still created; browsing existing history remains available."
+        },
+        "cmakeWorkflow.hostEndpoint": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional existing Host Unix socket path or Windows named pipe endpoint. Empty starts a private Host on first Host Doctor use. The CLI must support host serve."
+        },
+        "cmakeWorkflow.toolingInstallDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Tool directory used by Host Doctor/Fix and prepended to PATH for CLI child processes in this workspace. Relative paths resolve from the workspace folder. Host Fix can set this after successful verification."
         }
       }
-    }
+    },
+    "submenus": [
+      {
+        "id": "cmakeWorkflow.targetsMenu",
+        "label": "CMake Targets"
+      },
+      {
+        "id": "cmakeWorkflow.toolsMenu",
+        "label": "Tools & Environment"
+      },
+      {
+        "id": "cmakeWorkflow.campaignsMenu",
+        "label": "DagFlow Campaigns"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -431,19 +716,22 @@
     "test": "npm run compile-tests && node --test out/test/*.test.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.140.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
+    "@types/vscode": "^1.140.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
     "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "typescript-eslint": "^8.61.1"
   },
   "overrides": {
     "diff": "^8.0.4",
     "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "vscode-jsonrpc": "10.0.0"
   }
 }
