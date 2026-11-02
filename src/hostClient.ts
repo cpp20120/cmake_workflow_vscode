@@ -5,6 +5,8 @@ import { parseDoctorProgress, parseHostInfo, parseToolingPlan, parseFixPlan, par
 import { parsePlan, parseHistory, parseHistoryDetail, parseHistoryComparison, parseHistoryDetection } from './protocol';
 import { parseContext, parseTargetResolution, parseReportSnapshot, parseMeasurementRows,
   type HistoryRunsRequest, type HistoryMetricsRequest, type HistoryCompareRequest, type HistoryDetectRequest } from './applicationProtocol';
+import { parseOperationReference, parseRecoveryInspection, parseOperationEventsPage, parseOperationCancelResult,
+  type WorkflowStartRequest } from './durableProtocol';
 
 export class HostClient {
   private readonly connection: MessageConnection;
@@ -74,6 +76,24 @@ export class HostClient {
   }
   historyDetect(request: HistoryDetectRequest, signal?: AbortSignal) {
     return this.read('history/detect', request, parseHistoryDetection, signal);
+  }
+  startWorkflow(request: WorkflowStartRequest, signal?: AbortSignal) {
+    return this.read('workflow/start', request, parseOperationReference, signal);
+  }
+  findOperation(clientRequestId: string, signal?: AbortSignal) {
+    return this.read('operations/find', { clientRequestId }, parseOperationReference, signal);
+  }
+  getOperation(operationId: string, signal?: AbortSignal) {
+    return this.read('operations/get', { operationId }, parseOperationReference, signal);
+  }
+  inspectOperation(operationId: string, signal?: AbortSignal) {
+    return this.read('workflow/recoveryInspect', { operationId }, parseRecoveryInspection, signal);
+  }
+  operationEvents(operationId: string, afterSequence = 0, limit = 100, signal?: AbortSignal) {
+    return this.read('operations/events', { operationId, afterSequence, limit }, parseOperationEventsPage, signal);
+  }
+  cancelOperation(operationId: string, expectedRevision: number, signal?: AbortSignal) {
+    return this.read('operations/cancel', { operationId, expectedRevision }, parseOperationCancelResult, signal);
   }
   async doctor(profiles: string[], progress: (value: DoctorProgress) => void, signal?: AbortSignal, installDirectory: string | null = null): Promise<ToolingPlan> {
     const operationId = randomUUID(); let sequence = 0; let finished = false; let failure: Error | undefined;

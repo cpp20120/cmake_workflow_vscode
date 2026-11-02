@@ -16,6 +16,7 @@ import { registerProfileCommands } from './profileCommands';
 import { executeProfile } from './profileExecution';
 import { registerNativeCommands } from './nativeCommands';
 import { registerHostDoctor } from './hostDoctor';
+import { registerDurableCommands } from './durableCommands';
 import { toolDirectory, toolEnvironment } from './toolEnvironment';
 import { registerCampaignCommands } from './campaignCommands';
 import type { CommandServices } from './commandUi';
@@ -182,6 +183,18 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   registerNativeCommands(nativeServices);
   registerHostDoctor(context, { ...nativeServices, folder: selectFolder }, output);
+  registerDurableCommands(context, {
+    register, trusted, choose, folder: selectFolder,
+    onPlan: (selection, planned) => tree.set(selection, planned),
+    onEvent: event => tree.event(event),
+    onReport: async (folder, report, directory) => {
+      await tree.report(report, directory);
+      lastRuns.set(folder.uri.toString(), directory);
+      tree.status(`Host run ${report.status} • ${report.nodes.length} nodes`);
+    },
+    status: message => tree.status(message),
+    show: (title, body) => { infoPanel(title, body); },
+  }, output);
   registerCampaignCommands(nativeServices);
   register('cmakeWorkflow.selectWorkflow', async () => { await selectWorkflow(); });
   register('cmakeWorkflow.configureCli', async () => { const folder = current?.folder ?? await selectFolder(); if (!folder) { return; } const mode = await vscode.window.showQuickPick([
