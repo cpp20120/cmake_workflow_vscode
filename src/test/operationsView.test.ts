@@ -52,3 +52,49 @@ test('Operations View tracks multiple runs, preserves old last-run index, and ne
     assert.ok(view.getChildren(view.getChildren()[0]).some(item => String(item.label).includes('Host unavailable')));
   } finally { view.dispose(); }
 });
+
+test('Operations View displays paged Host operations without a local run index', () => {
+  const view = new OperationsView(state());
+  const operation = { workspaceId: 'workspace', operationId: record.operationId, clientRequestId: 'remote',
+    kind: 'workflow', state: 'succeeded', manifestSha256: 'a'.repeat(64), manifestBaseDirectory: '/work' };
+  try {
+    view.setPage(folder, { schemaVersion: 1, items: [operation], nextCursor: 'page-2' }, null);
+    assert.match(String(view.getChildren()[0].description), /succeeded/);
+    assert.equal(view.getChildren()[1].label, 'Load more operations');
+    assert.ok(view.target({ folderKey: folder.uri.toString(), operationId: operation.operationId }));
+    view.setPage(folder, { schemaVersion: 1, items: [{ ...operation, operationId: '2'.repeat(32) }], nextCursor: null }, 'page-2');
+    assert.equal(view.getChildren().length, 2);
+    assert.equal(view.localRecords(folder).length, 0);
+  } finally { view.dispose(); }
+});
+
+test('Operations shows workflow success and History failure independently', async () => {
+  const view = new OperationsView(state());
+  try {
+    await view.track(folder, record);
+    view.observe(folder, record.operationId, { ...inspection, terminalState: 'succeeded' }, [], 0, false);
+    view.setHistory(folder, { operationId: record.operationId, state: 'failed', databasePath: null,
+      updatedAt: null, diagnosticCode: 'report_changed' });
+    const row = view.getChildren()[0];
+    assert.match(String(row.description), /succeeded.*History: failed/);
+    assert.ok(view.getChildren(row).some(item => String(item.label).includes('report_changed')));
+  } finally { view.dispose(); }
+});
+
+test('Operations projects live events into node rows and replaces them with finalized node state', async () => {
+  const view = new OperationsView(state());
+  try {
+    await view.track(folder, record);
+    view.observe(folder, record.operationId, inspection, [{
+      schemaVersion: 1, sequence: 1, timestamp: '2026-11-02T00:00:00Z', type: 'node_started',
+      runDirectory: '/work/results', nodeId: 'build', nodeKind: 'build', status: 'running', exitCode: null,
+      error: null, artifacts: [],
+    }], 1, false);
+    const root = view.getChildren()[0];
+    assert.deepEqual(view.getChildren(root).map(item => item.label), ['build']);
+    assert.match(String(view.getChildren(root)[0].description), /running/);
+    view.setFinalizedNodes(folder, record.operationId, [{ id: 'build', kind: 'build', status: 'succeeded',
+      dependencies: ['configure'], startedAt: null, finishedAt: null, exitCode: 0, error: null, stdout: null, stderr: null }]);
+    assert.match(String(view.getChildren(root)[0].description), /succeeded/);
+  } finally { view.dispose(); }
+});

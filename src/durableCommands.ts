@@ -1,3 +1,5 @@
+import { nodeDetailsHtml, operationDetailsHtml } from './operationDetails';
+import type { HistoryIndexStatus, HistoryPolicy } from './historyProtocol';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -7,11 +9,12 @@ import { configuredJobs } from './settings';
 import { toolDirectory, toolEnvironment } from './toolEnvironment';
 import { escapeHtml } from './inspectionHtml';
 import type { Event, Plan, Report } from './protocol';
-import type { OperationReference } from './durableProtocol';
+import type { OperationReference, WorkflowStartRequest } from './durableProtocol';
 import { OperationsView } from './operationsView';
+import { downloadOperationArtifact } from './operationArtifacts';
 
 interface Selection { folder: vscode.WorkspaceFolder; file: vscode.Uri }
-interface Pending { clientRequestId: string; manifest: string; manifestSha256: string; jobs: number; resultsDirectory: string }
+type Pending = WorkflowStartRequest;
 interface LastOperation { operationId: string; clientRequestId: string }
 
 export interface DurableServices {
@@ -20,23 +23,24 @@ export interface DurableServices {
   choose(): Promise<Selection | undefined>;
   folder(): Promise<vscode.WorkspaceFolder | undefined>;
   onPlan(selection: Selection, plan: Plan): void;
-  onEvent(event: Event): void;
-  onReport(folder: vscode.WorkspaceFolder, report: Report, directory: string): Promise<void>;
+  onHistoryStatus?(folder: vscode.WorkspaceFolder, status: HistoryIndexStatus): void;
+  onReport(folder: vscode.WorkspaceFolder, report: Report, directory: string, operationId: string): Promise<void>;
   status(message: string): void;
-  show(title: string, body: string): void;
+  openHistoryDatabase?(folder: vscode.WorkspaceFolder, databasePath: string): Promise<void>;
+  show(title: string, body: string, panelKey?: string): void;
 }
 
 // This Host has a separate lifecycle from the request. Closing one RPC client
 // does not cancel an accepted workflow. Stopping the Host DOES interrupt execution.
 export function registerDurableCommands(context: vscode.ExtensionContext, services: DurableServices,
-  output: vscode.OutputChannel): void {
+  output: vscode.OutputChannel) {
   const operationsView = new OperationsView(context.workspaceState);
   context.subscriptions.push(operationsView, vscode.window.registerTreeDataProvider('cmakeWorkflow.operations', operationsView));
   const hosts = new Map<string, HostProcess>();
   const busy = new Set<string>();
   const following = new Set<string>();
   const active = new Set<HostClient>();
-  const stop = (key: string): void => { hosts.get(key)?.dispose(); hosts.delete(key); };
+  const stop = (key: string): void => { hosts.get(key)?.dispose(); hosts.delete(key); operationsView.clearListing(key); };
   context.subscriptions.push({ dispose: () => {
     for (const client of active) { client.dispose(); }
     for (const key of hosts.keys()) { stop(key); }
@@ -106,7 +110,7 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
     finally { busy.delete(key); }
   };
 
-  services.register('cmakeWorkflow.runDurableWorkflow', async () => {
+  const runWorkflow = async (selectNodes: boolean, selectedIds?: string[]): Promise<void> => {
     if (!services.trusted()) { return; }
     const selection = await services.choose(); if (!selection) { return; }
     const key = selection.folder.uri.toString();
@@ -126,9 +130,44 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
         ensure(client, 'workflow/plan', 'workflow/start', 'operations/find');
         services.status('Planning via Host…');
         const planned = await client.planWorkflow(selection.file.fsPath);
-        services.onPlan(selection, planned);
-        if (!planned.valid) { throw Error('Host workflow plan is invalid. Inspect its node diagnostics.'); }
+        let only = selectedIds;
+        if (selectNodes || only?.length) {
+          ensure(client, 'workflow/nodeSelection', 'workflow/preflight');
+          if (selectNodes) {
+            const nodes = await vscode.window.showQuickPick(planned.nodes.map(node => ({
+              label: node.id, description: `${node.kind} • ${node.target}`,
+            })), { canPickMany: true, placeHolder: 'Select workflow nodes to run with their prerequisites' });
+            if (!nodes?.length) { return; }
+            only = nodes.map(node => node.label);
+          }
+        } else {
+          services.onPlan(selection, planned);
+          if (!planned.valid) { throw Error('Host workflow plan is invalid. Inspect its node diagnostics.'); }
+        }
         const config = vscode.workspace.getConfiguration('cmakeWorkflow', selection.folder.uri);
+        let historyPolicy: HistoryPolicy | undefined;
+        if (client.supports('workflow/historyPolicy')) {
+          const configured = config.get<string>('historyDb', '').trim();
+          const disabled = config.get<boolean>('noHistory', false);
+          const choices = [
+            { label: 'Default', description: 'Workspace History database', mode: 'Default' as const },
+            { label: 'Disabled', description: 'Skip History indexing', mode: 'Disabled' as const },
+            { label: 'Explicit Database', description: 'Choose a database within the workspace', mode: 'ExplicitDatabase' as const },
+          ];
+          const preferred = disabled ? 'Disabled' : configured ? 'ExplicitDatabase' : 'Default';
+          const selected = await vscode.window.showQuickPick(
+            [...choices.filter(item => item.mode === preferred), ...choices.filter(item => item.mode !== preferred)],
+            { placeHolder: 'Choose History indexing for this run' });
+          if (!selected) { return; }
+          if (selected.mode === 'ExplicitDatabase') {
+            const value = await vscode.window.showInputBox({ prompt: 'History database path on the workspace host',
+              value: configured, validateInput: input => input.trim() ? undefined : 'Enter a database path.' });
+            if (value === undefined) { return; }
+            historyPolicy = { mode: selected.mode, databasePath: path.resolve(selection.folder.uri.fsPath, value.trim()) };
+          } else {
+            historyPolicy = { mode: selected.mode };
+          }
+        }
         const jobs = configuredJobs(config.inspect<number>('jobs')) ?? 1;
         const root = config.get<string>('resultsDir', '').trim() || 'out/results';
         const outputRoot = path.resolve(selection.folder.uri.fsPath, root);
@@ -137,9 +176,27 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
           throw Error('Host requires cmakeWorkflow.resultsDir to be inside the workspace.');
         }
         // The Host checks the exact manifest hash again before durable admission.
-        const request: Pending = { clientRequestId: randomUUID(), manifest: selection.file.fsPath,
-          manifestSha256: planned.manifestHash, jobs, resultsDirectory: path.join(outputRoot, `host-${randomUUID()}`) };
-        if (!/^[0-9a-f]{64}$/i.test(request.manifestSha256)) { throw Error('Invalid manifest hash from Host plan.'); }
+        const input = { manifest: selection.file.fsPath,
+          manifestSha256: planned.manifestHash, jobs, resultsDirectory: path.join(outputRoot, `host-${randomUUID()}`), only, historyPolicy };
+        if (!/^[0-9a-f]{64}$/i.test(input.manifestSha256)) { throw Error('Invalid manifest hash from Host plan.'); }
+        let admission = input;
+        if (client.supports('workflow/preflight')) {
+          const reviewed = await client.preflightWorkflow(input);
+          services.onPlan(selection, reviewed.plan);
+          if (reviewed.historyPolicy?.mode !== historyPolicy?.mode) { throw Error('Host preflight returned a different History policy.'); }
+          admission = { ...input, historyPolicy: reviewed.historyPolicy };
+          if (!reviewed.plan.valid) { throw Error('Host workflow preflight failed. Inspect its node diagnostics.'); }
+          if (only?.length) {
+            const reviewedIds = new Set(reviewed.only);
+            if (reviewedIds.size !== only.length || only.some(id => !reviewedIds.has(id))) {
+              throw Error('Host preflight returned a different workflow selection.');
+            }
+            const answer = await vscode.window.showInformationMessage(
+              `Run ${reviewed.plan.nodes.length} nodes including prerequisites?`, { modal: true }, 'Run Nodes');
+            if (answer !== 'Run Nodes') { return; }
+          }
+        }
+        const request: Pending = { ...admission, clientRequestId: randomUUID() };
         await context.workspaceState.update(pendingKey(selection.folder), request);
         operationsView.refresh();
         services.status('Submitting workflow to Host…');
@@ -161,44 +218,73 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
         }
       } finally { connection.release(); }
     } finally { busy.delete(key); }
-  });
+  };
+  services.register('cmakeWorkflow.runWorkflow', () => runWorkflow(false));
+  services.register('cmakeWorkflow.runDurableWorkflow', () => runWorkflow(false));
+  services.register('cmakeWorkflow.runSelectedNodes', () => runWorkflow(true));
+  services.register('cmakeWorkflow.runSelectedNodesViaHost', () => runWorkflow(true));
 
-  const inspectOne = async (folder: vscode.WorkspaceFolder, client: HostClient, id: string, show = false, signal?: AbortSignal): Promise<void> => {
+  const updateHistory = async (folder: vscode.WorkspaceFolder, client: HostClient, id: string, signal?: AbortSignal) => {
+    if (!client.supports('history/indexStatus')) { return; }
+    try {
+      const status = await client.historyIndexStatus(id, signal);
+      operationsView.setHistory(folder, status);
+      if (operationsView.records(folder)[0]?.operationId === status.operationId) { services.onHistoryStatus?.(folder, status); }
+      return status;
+    }
+    catch (error) { if (!signal?.aborted) { output.appendLine(`History status for ${id}: ${String(error)}`); } }
+  };
+
+  const inspectOne = async (folder: vscode.WorkspaceFolder, client: HostClient, id: string, show = false, signal?: AbortSignal): Promise<HistoryIndexStatus | undefined> => {
     ensure(client, 'workflow/recoveryInspect', 'operations/events');
     try {
       const inspection = await client.inspectOperation(id, signal);
       const old = operationsView.observation(folder, id);
       let sequence = old?.nextSequence ?? 0;
-      let hasMore = false;
+      let hasMore = old?.hasMore ?? false;
       const fresh: Event[] = [];
-      // Replay is paginated and explicitly bounded. Subsequent refreshes continue
-      // from the last cursor; never treat an incomplete event feed as a checkpoint.
-      for (let page = 0; page < 4; page++) {
-        const batch = await client.operationEvents(id, sequence, 500, signal);
-        if (batch.operationId !== id || batch.afterSequence !== sequence) { throw Error('Unexpected Host event cursor'); }
-        sequence = batch.nextSequence; hasMore = batch.hasMore;
-        fresh.push(...batch.events);
-        if (!hasMore) { break; }
+      let finalized = false;
+      if (inspection.terminalState && client.supports('operations/overview')) {
+        try {
+          const overview = await client.operationOverview(id, signal);
+          if (overview.schemaVersion !== 1 || overview.operation.operationId !== id || !overview.isFinalized) {
+            throw Error('Host did not return a finalized overview for this operation.');
+          }
+          operationsView.setFinalizedNodes(folder, id, overview.nodes);
+          finalized = true;
+        } catch (error) {
+          if (signal?.aborted) { throw error; }
+          output.appendLine(`Verified overview for ${id}: ${String(error)}`);
+        }
+      }
+      if (!finalized) {
+        for (let page = 0; page < 4; page++) {
+          const batch = await client.operationEvents(id, sequence, 500, signal);
+          if (batch.operationId !== id || batch.afterSequence !== sequence) { throw Error('Unexpected Host event cursor'); }
+          sequence = batch.nextSequence; hasMore = batch.hasMore;
+          fresh.push(...batch.events);
+          if (!hasMore) { break; }
+        }
       }
       operationsView.observe(folder, id, inspection, fresh, sequence, hasMore);
-      const observed = operationsView.observation(folder, id)!;
+      const historyStatus = await updateHistory(folder, client, id, signal);
       if (show) {
-        const rows = observed.events.slice(-60).map(e => `<tr><td>${e.sequence}</td><td>${escapeHtml(e.type)}</td><td>${escapeHtml(e.nodeId ?? '—')}</td><td>${escapeHtml(e.status ?? '—')}</td></tr>`).join('');
         services.show(`Host operation: ${id.slice(0, 12)}`,
-          `<p><strong>Operation:</strong> ${escapeHtml(id)}</p>`
-          + `<p><strong>Acceptance:</strong> ${escapeHtml(inspection.acceptanceState)} • <strong>Terminal:</strong> ${escapeHtml(inspection.terminalState ?? 'not finalized')}</p>`
-          + `<p><strong>Cancellation requested:</strong> ${inspection.cancellationRequested ? 'yes' : 'no'} • <strong>Recovery decision:</strong> ${escapeHtml(inspection.decision ?? 'none')}</p>`
-          + `<p><strong>Run directory:</strong> ${escapeHtml(inspection.runDirectory ?? 'not dispatched')}</p>`
-          + `<p>Observed events through sequence ${sequence}${hasMore ? ' (more available; Refresh to continue)' : ''}. This is not a recovery checkpoint.</p>`
-          + `<table><thead><tr><th>#</th><th>Event</th><th>Node</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`);
+          operationDetailsHtml(inspection, operationsView.nodes(folder, id).length, historyStatus?.state),
+          'operation-summary');
       }
       if (show && inspection.runDirectory && inspection.terminalState) {
         try {
-          const saved = await client.getRun(inspection.runDirectory);
-          await services.onReport(folder, saved.report, saved.runDirectory);
+          const operation = await client.getOperation(id);
+          if (operation.kind === 'workflow') {
+            const saved = client.supports('operations/report')
+              ? await client.operationReport(id) : await client.getRun(inspection.runDirectory);
+            await services.onReport(folder, saved.report, saved.runDirectory, id);
+          }
         } catch (error) { output.appendLine(`Host report unavailable for ${id}: ${String(error)}`); }
       }
       if (show) { services.status(inspection.terminalState ? `Host operation ${inspection.terminalState}` : `Host operation ${inspection.acceptanceState}`); }
+      return historyStatus;
     } catch (error) {
       if (!signal?.aborted) { operationsView.failed(folder, id, String(error)); }
       throw error;
@@ -224,7 +310,7 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
     const folders = vscode.workspace.workspaceFolders ?? [];
     for (const folder of folders) {
       const key = folder.uri.toString();
-      if (busy.has(key) || (!operationsView.records(folder).length && !context.workspaceState.get<Pending>(pendingKey(folder)))) { continue; }
+      if (busy.has(key)) { continue; }
       busy.add(key);
       try {
         const connection = await connect(folder);
@@ -244,7 +330,12 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
               output.appendLine(`Pending request ${pending.clientRequestId} still unresolved: ${String(error)}. No execution was retried.`);
             }
           }
-          for (const record of operationsView.records(folder)) {
+          if (connection.client.supports('operations/list')) {
+            const page = await connection.client.listOperations();
+            operationsView.setPage(folder, page, null);
+            for (const item of page.items) { await updateHistory(folder, connection.client, item.operationId); }
+          }
+          for (const record of operationsView.localRecords(folder)) {
             try { await inspectOne(folder, connection.client, record.operationId); }
             catch (error) { output.appendLine(`Host operation ${record.operationId}: ${String(error)}`); }
           }
@@ -254,8 +345,149 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
     }
     operationsView.refresh();
   });
+  services.register('cmakeWorkflow.loadMoreDurableOperations', async value => {
+    if (!services.trusted()) { return; }
+    const folder = (vscode.workspace.workspaceFolders ?? []).find(candidate => candidate.uri.toString() === value);
+    if (!folder) { return; }
+    const key = folder.uri.toString();
+    const cursor = operationsView.nextCursor(folder);
+    if (!cursor || busy.has(key)) { return; }
+    busy.add(key);
+    try {
+      const connection = await connect(folder);
+      try {
+        const page = await connection.client.listOperations(cursor);
+        operationsView.setPage(folder, page, cursor);
+        for (const item of page.items) { await updateHistory(folder, connection.client, item.operationId); }
+      }
+      finally { connection.release(); }
+    } finally { busy.delete(key); }
+  });
   services.register('cmakeWorkflow.openDurableOperation', async (...args: unknown[]) => {
-    await withTarget(args[0], (folder, client, id) => inspectOne(folder, client, id, true));
+    await withTarget(args[0], async (folder, client, id) => { await inspectOne(folder, client, id, true); });
+  });
+  services.register('cmakeWorkflow.openOperationNode', async value => {
+    if (!services.trusted()) { return; }
+    const target = operationsView.target(value);
+    const nodeId = (value as { nodeId?: unknown } | undefined)?.nodeId;
+    if (!target || typeof nodeId !== 'string') { return; }
+    const node = operationsView.nodes(target.folder, target.operationId).find(item => item.id === nodeId);
+    if (node) { services.show(`Node: ${node.id}`, nodeDetailsHtml(node), 'operation-node'); }
+  });
+  services.register('cmakeWorkflow.openOperationEvents', async value => {
+    await withTarget(value, async (folder, client, id) => {
+      const events: Event[] = [];
+      let cursor = 0;
+      let hasMore = false;
+      for (let page = 0; page < 4; page++) {
+        const batch = await client.operationEvents(id, cursor, 500);
+        if (batch.operationId !== id || batch.afterSequence !== cursor || (batch.hasMore && batch.nextSequence <= cursor)) {
+          throw Error('Unexpected Host event cursor');
+        }
+        cursor = batch.nextSequence;
+        events.push(...batch.events);
+        hasMore = batch.hasMore;
+        if (!hasMore) { break; }
+      }
+      services.show(`Raw events: ${id.slice(0, 12)}`,
+        `<p>${events.length} events${hasMore ? ' · first 2,000 events shown' : ''}</p>`
+        + `<pre>${escapeHtml(events.map(event => JSON.stringify(event)).join('\n'))}</pre>`,
+        JSON.stringify([folder.uri.toString(), id, 'events']));
+    });
+  });
+  services.register('cmakeWorkflow.openOperationHistory', async value => {
+    await withTarget(value, async (folder, client, id) => {
+      ensure(client, 'history/indexStatus');
+      const status = await client.historyIndexStatus(id);
+      operationsView.setHistory(folder, status);
+      if (operationsView.records(folder)[0]?.operationId === status.operationId) { services.onHistoryStatus?.(folder, status); }
+      if (status.state !== 'indexed' || !status.databasePath) {
+        void vscode.window.showInformationMessage(`History indexing: ${status.state}`);
+        return;
+      }
+      await services.openHistoryDatabase?.(folder, status.databasePath);
+    });
+  });
+  services.register('cmakeWorkflow.retryHistoryIndex', async value => {
+    await withTarget(value, async (folder, client, id) => {
+      ensure(client, 'history/retryIndex');
+      const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+        title: 'Retrying History indexing' }, () => client.retryHistoryIndex(id));
+      operationsView.setHistory(folder, result);
+      if (operationsView.records(folder)[0]?.operationId === result.operationId) { services.onHistoryStatus?.(folder, result); }
+      void vscode.window.showInformationMessage(`History indexing: ${result.state}${result.diagnosticCode ? ` (${result.diagnosticCode})` : ''}`);
+    });
+  });
+  services.register('cmakeWorkflow.downloadDurableArtifact', async value => {
+    await withTarget(value, async (folder, client, id) => {
+      ensure(client, 'operations/artifacts/list', 'operations/artifacts/readChunk', 'operations/artifacts/timestampText');
+      const catalog = await client.listOperationArtifacts(id);
+      const nodeId = (value as { nodeId?: unknown } | undefined)?.nodeId;
+      const artifacts = typeof nodeId === 'string' ? catalog.filter(item => item.nodeId === nodeId) : catalog;
+      if (!artifacts.length) { void vscode.window.showInformationMessage('No finalized artifacts are available.'); return; }
+      const picked = await vscode.window.showQuickPick(artifacts.map(artifact => ({ label: artifact.relativePath,
+        description: `${artifact.kind} • ${artifact.size} bytes`, artifact })), { placeHolder: 'Choose a Host artifact' });
+      if (!picked) { return; }
+      const { artifact } = picked;
+      const name = path.posix.basename(artifact.relativePath.replace(/\\/g, '/'));
+      const destination = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.joinPath(folder.uri, name), saveLabel: 'Save Artifact' });
+      if (!destination) { return; }
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+        title: `Downloading ${name}`, cancellable: true }, async (progress, token) => {
+        const abort = new AbortController();
+        const subscription = token.onCancellationRequested(() => abort.abort());
+        if (token.isCancellationRequested) { abort.abort(); }
+        try {
+          await downloadOperationArtifact(destination.fsPath, artifact, async offset => {
+            progress.report({ message: `${offset} of ${artifact.size} bytes` });
+            return client.readOperationArtifactChunk(id, artifact, offset, abort.signal);
+          }, abort.signal);
+          void vscode.window.showInformationMessage(`Verified artifact saved to ${destination.fsPath}.`);
+        } catch (error) { if (!abort.signal.aborted) { throw error; } }
+        finally { subscription.dispose(); }
+      });
+    });
+  });
+  services.register('cmakeWorkflow.recoverDurableOperation', async value => {
+    await withTarget(value, async (folder, client, id) => {
+      ensure(client, 'workflow/recoveryInspect');
+      const observed = await client.inspectOperation(id);
+      if (observed.operationId !== id || observed.terminalState || observed.cancellationRequested
+        || observed.acceptanceState !== 'dispatch_authorized') {
+        throw Error('Host operation is unavailable for recovery. Inspect its current state.');
+      }
+      let action: () => Promise<unknown>;
+      let label: string;
+      if (!observed.decision && observed.revision === 0) {
+        ensure(client, 'workflow/reconcile');
+        const picked = await vscode.window.showQuickPick([
+          { label: 'Needs attention', description: 'Review the checkpoint for possible resume', value: 'needs_attention' as const },
+          { label: 'Outcome unknown', description: 'Record an unresolved outcome', value: 'outcome_unknown' as const },
+        ], { placeHolder: 'Record a recovery decision' });
+        if (!picked) { return; }
+        const note = await vscode.window.showInputBox({ prompt: 'Record what you verified and why you chose this decision',
+          validateInput: text => text.trim() && text.length <= 4096 ? undefined : 'Enter a note of 1–4096 characters.' });
+        if (note === undefined) { return; }
+        label = 'Record Decision';
+        action = () => client.reconcileOperation(id, observed.revision, picked.value, note);
+      } else if (observed.decision === 'needs_attention' && observed.revision === 1) {
+        ensure(client, 'workflow/resume');
+        label = 'Prepare Resume';
+        action = () => client.admitOperationResume(id, observed.revision);
+      } else if (observed.decision === 'needs_attention' && observed.revision === 2) {
+        ensure(client, 'workflow/resumeExecute');
+        label = 'Execute Resume';
+        action = () => client.executeOperationResume(id, observed.revision);
+      } else {
+        throw Error('Host recovery has no available next step for this operation.');
+      }
+      const answer = await vscode.window.showWarningMessage(`${label} for ${id}?`, {
+        modal: true, detail: 'Confirm that all prior processes for this operation have stopped.',
+      }, label);
+      if (answer !== label) { return; }
+      await action();
+      await inspectOne(folder, client, id, true);
+    });
   });
   services.register('cmakeWorkflow.cancelDurableOperationItem', async (...args: unknown[]) => {
     await withTarget(args[0], async (folder, client, id) => {
@@ -288,12 +520,14 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
         const canceled = token.onCancellationRequested(() => abort.abort());
         try {
           while (!token.isCancellationRequested) {
-            try { await inspectOne(target.folder, connection.client, target.operationId, false, abort.signal); }
+            let historyState;
+            try { historyState = (await inspectOne(target.folder, connection.client, target.operationId, false, abort.signal))?.state; }
             catch (error) { if (abort.signal.aborted) { break; } throw error; }
             const state = operationsView.observation(target.folder, target.operationId);
             const terminal = state?.inspection?.terminalState;
             progress.report({ message: terminal ?? state?.inspection?.acceptanceState ?? 'checking…' });
-            if (terminal) { break; }
+            if (terminal && historyState !== 'pending' && historyState !== 'indexing') { break; }
+            if (terminal && historyState) { progress.report({ message: `${terminal} • History: ${historyState}` }); }
             await new Promise<void>(resolve => {
               const timeout = setTimeout(() => { subscription.dispose(); resolve(); }, 1200);
               const subscription = token.onCancellationRequested(() => { clearTimeout(timeout); subscription.dispose(); resolve(); });
@@ -334,4 +568,27 @@ export function registerDurableCommands(context: vscode.ExtensionContext, servic
       { modal: true }, 'Stop Host');
     if (answer === 'Stop Host') { stop(key); }
   });
+
+  const withHost = async <T>(folder: vscode.WorkspaceFolder, action: (client: HostClient) => Promise<T>): Promise<T> => {
+    const connection = await connect(folder);
+    try { return await action(connection.client); }
+    finally { connection.release(); }
+  };
+  const refreshLatestHistoryStatus = async (folder: vscode.WorkspaceFolder): Promise<void> => {
+    await withHost(folder, async client => {
+      if (!client.supports('history/indexStatus')) { return; }
+      let latest = operationsView.records(folder)[0]?.operationId;
+      if (client.supports('operations/list')) {
+        const page = await client.listOperations();
+        operationsView.rememberLatest(folder, page);
+        latest = page.items[0]?.operationId ?? latest;
+      }
+      if (latest) {
+        const status = await client.historyIndexStatus(latest);
+        operationsView.setHistory(folder, status);
+        services.onHistoryStatus?.(folder, status);
+      }
+    });
+  };
+  return { withHost, refreshLatestHistoryStatus, runNode: (id: string) => runWorkflow(false, [id]) };
 }

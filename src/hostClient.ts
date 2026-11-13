@@ -1,3 +1,5 @@
+import type { HostRpcMethod, HostRpcRequests, HostRpcResults } from './hostContract.generated';
+import { parseHistoryImport, parseHistoryIndexStatus, parseHistoryPage } from './historyProtocol';
 import * as net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter, CancellationTokenSource, ParameterStructures, type MessageConnection } from 'vscode-jsonrpc/node';
@@ -5,12 +7,16 @@ import { parseDoctorProgress, parseHostInfo, parseToolingPlan, parseFixPlan, par
 import { parsePlan, parseHistory, parseHistoryDetail, parseHistoryComparison, parseHistoryDetection } from './protocol';
 import { parseContext, parseTargetResolution, parseReportSnapshot, parseMeasurementRows,
   type HistoryRunsRequest, type HistoryMetricsRequest, type HistoryCompareRequest, type HistoryDetectRequest } from './applicationProtocol';
-import { parseOperationReference, parseRecoveryInspection, parseOperationEventsPage, parseOperationCancelResult,
-  type WorkflowStartRequest } from './durableProtocol';
+import { parseOperationReference, parseOperationPage, parseRecoveryInspection, parseOperationEventsPage, parseOperationCancelResult,
+  parseOperationArtifacts, parseOperationArtifactChunk, parseWorkflowPreflight,
+  type OperationArtifact, type WorkflowPreflightRequest, type WorkflowStartRequest } from './durableProtocol';
 
 export class HostClient {
   private readonly connection: MessageConnection;
   private disposed = false;
+  private identity?: HostInfo;
+  get info(): HostInfo | undefined { return this.identity; }
+  get closed(): boolean { return this.disposed; }
   private capabilities = new Set<string>();
   private constructor(private readonly socket: net.Socket) {
     this.connection = createMessageConnection(new StreamMessageReader(socket), new StreamMessageWriter(socket));
@@ -37,6 +43,7 @@ export class HostClient {
       const client = new HostClient(socket);
       try {
         const info = parseHostInfo(await client.request('initialize', { protocolVersion: 1, workspaceDirectory: workspace }, signal, 10000));
+        client.identity = info;
         client.capabilities = new Set(info.capabilities);
         return { client, info };
       } catch (error) { client.dispose(); throw error; }
@@ -44,8 +51,20 @@ export class HostClient {
   }
   supports(method: string): boolean { return this.capabilities.has(method); }
   private async read<T>(method: string, request: unknown, parse: (value: unknown) => T, signal?: AbortSignal): Promise<T> {
-    if (!this.supports(method)) { throw Error(`Host does not advertise ${method}; use the CLI fallback for this capability.`); }
+    if (!this.supports(method)) { throw Error(`Host does not advertise ${method}. Install a newer CMakeWorkflow Host.`); }
     return parse(await this.request(method, request, signal, 60000));
+  }
+  async invoke<Method extends HostRpcMethod>(method: Method, request: HostRpcRequests[Method],
+    signal?: AbortSignal): Promise<HostRpcResults[Method]> {
+    if (!this.supports(method)) { throw Error(`Host does not advertise ${method}.`); }
+    if (method === 'workflow/start' || method === 'workflow/preflight') {
+      this.requireWorkflowFeatures(request as HostRpcRequests['workflow/preflight']);
+    }
+    if (method === 'operations/artifacts/readChunk' && 'expectedLastWriteUtcTicksText' in request
+      && request.expectedLastWriteUtcTicksText && !this.supports('operations/artifacts/timestampText')) {
+      throw Error('Host does not support exact artifact timestamps.');
+    }
+    return await this.request(method, request, signal, 4 * 60 * 60 * 1000) as HostRpcResults[Method];
   }
   inspectContext(buildDirectory: string, signal?: AbortSignal) {
     return this.read('context/inspect', { buildDirectory }, parseContext, signal);
@@ -56,8 +75,26 @@ export class HostClient {
   planWorkflow(manifest: string, only: string[] = [], controllerBuildDirectory: string | null = null, signal?: AbortSignal) {
     return this.read('workflow/plan', { manifest, only, controllerBuildDirectory }, parsePlan, signal);
   }
+  operationOverview(operationId: string, signal?: AbortSignal) {
+    return this.invoke('operations/overview', { operationId }, signal);
+  }
+  operationReport(operationId: string, signal?: AbortSignal) {
+    return this.read('operations/report', { operationId }, parseReportSnapshot, signal);
+  }
   getRun(runDirectory: string, signal?: AbortSignal) {
     return this.read('runs/get', { runDirectory }, parseReportSnapshot, signal);
+  }
+  historyRunsPage(request: HistoryRunsRequest & { cursor?: string }, signal?: AbortSignal) {
+    return this.read('history/runsPage', request, parseHistoryPage, signal);
+  }
+  historyImport(databasePath: string, directory: string, recursive: boolean, signal?: AbortSignal) {
+    return this.read('history/import', { databasePath, directory, recursive }, parseHistoryImport, signal);
+  }
+  historyIndexStatus(operationId: string, signal?: AbortSignal) {
+    return this.read('history/indexStatus', { operationId }, value => parseHistoryIndexStatus(value, operationId), signal);
+  }
+  retryHistoryIndex(operationId: string, signal?: AbortSignal) {
+    return this.read('history/retryIndex', { operationId }, value => parseHistoryIndexStatus(value, operationId), signal);
   }
   historyRuns(request: HistoryRunsRequest, signal?: AbortSignal) {
     return this.read('history/runs', request, parseHistory, signal);
@@ -77,7 +114,20 @@ export class HostClient {
   historyDetect(request: HistoryDetectRequest, signal?: AbortSignal) {
     return this.read('history/detect', request, parseHistoryDetection, signal);
   }
+  preflightWorkflow(request: WorkflowPreflightRequest, signal?: AbortSignal) {
+    this.requireWorkflowFeatures(request);
+    return this.read('workflow/preflight', request, parseWorkflowPreflight, signal);
+  }
+  private requireWorkflowFeatures(request: Pick<HostRpcRequests['workflow/preflight'], 'only' | 'historyPolicy'>): void {
+    if (request.historyPolicy && !this.supports('workflow/historyPolicy')) {
+      throw Error('Host does not support History policy. Install a newer CMakeWorkflow Host.');
+    }
+    if (request.only?.length && !this.supports('workflow/nodeSelection')) {
+      throw Error('Host does not support running selected workflow nodes. Install a newer CMakeWorkflow Host.');
+    }
+  }
   startWorkflow(request: WorkflowStartRequest, signal?: AbortSignal) {
+    this.requireWorkflowFeatures(request);
     return this.read('workflow/start', request, parseOperationReference, signal);
   }
   findOperation(clientRequestId: string, signal?: AbortSignal) {
@@ -86,8 +136,28 @@ export class HostClient {
   getOperation(operationId: string, signal?: AbortSignal) {
     return this.read('operations/get', { operationId }, parseOperationReference, signal);
   }
+  listOperations(cursor: string | null = null, signal?: AbortSignal) {
+    return this.read('operations/list', { limit: 50, cursor }, parseOperationPage, signal);
+  }
+  listOperationArtifacts(operationId: string, signal?: AbortSignal) {
+    return this.read('operations/artifacts/list', { operationId }, value => parseOperationArtifacts(value, operationId), signal);
+  }
+  readOperationArtifactChunk(operationId: string, artifact: OperationArtifact, offset: number, signal?: AbortSignal) {
+    return this.read('operations/artifacts/readChunk', { operationId, artifactId: artifact.artifactId, offset,
+      count: 65536, expectedSize: artifact.size, expectedLastWriteUtcTicks: 0,
+      expectedLastWriteUtcTicksText: artifact.lastWriteUtcTicksText }, parseOperationArtifactChunk, signal);
+  }
   inspectOperation(operationId: string, signal?: AbortSignal) {
     return this.read('workflow/recoveryInspect', { operationId }, parseRecoveryInspection, signal);
+  }
+  reconcileOperation(operationId: string, expectedRevision: number, decision: 'needs_attention' | 'outcome_unknown', note: string) {
+    return this.read('workflow/reconcile', { operationId, expectedRevision, decision, note, confirmedQuiescent: true }, parseRecoveryInspection);
+  }
+  admitOperationResume(operationId: string, expectedRevision: number) {
+    return this.read('workflow/resume', { operationId, expectedRevision, confirmedQuiescent: true }, parseRecoveryInspection);
+  }
+  executeOperationResume(operationId: string, expectedRevision: number) {
+    return this.read('workflow/resumeExecute', { operationId, expectedRevision, confirmedQuiescent: true }, parseRecoveryInspection);
   }
   operationEvents(operationId: string, afterSequence = 0, limit = 100, signal?: AbortSignal) {
     return this.read('operations/events', { operationId, afterSequence, limit }, parseOperationEventsPage, signal);
@@ -95,8 +165,8 @@ export class HostClient {
   cancelOperation(operationId: string, expectedRevision: number, signal?: AbortSignal) {
     return this.read('operations/cancel', { operationId, expectedRevision }, parseOperationCancelResult, signal);
   }
-  async doctor(profiles: string[], progress: (value: DoctorProgress) => void, signal?: AbortSignal, installDirectory: string | null = null): Promise<ToolingPlan> {
-    const operationId = randomUUID(); let sequence = 0; let finished = false; let failure: Error | undefined;
+  async doctor(profiles: string[], progress: (value: DoctorProgress) => void, signal?: AbortSignal, installDirectory: string | null = null, operationId: string = randomUUID()): Promise<ToolingPlan> {
+    let sequence = 0; let finished = false; let failure: Error | undefined;
     const subscription = this.connection.onNotification('tooling/progress', (value: unknown) => {
       try {
         const event = parseDoctorProgress(value);
@@ -128,11 +198,11 @@ export class HostClient {
     finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); cancellation.dispose(); }
   }
   async planFix(profiles: string[], installDirectory: string | null, packageManager: PackageManager,
-    allowFallback: boolean, signal?: AbortSignal): Promise<FixPlan> {
-    return parseFixPlan(await this.request('tooling/planFix', { profiles, installDirectory, packageManager, allowFallback }, signal, 300000));
+    allowFallback: boolean, signal?: AbortSignal, runDirectory?: string | null): Promise<FixPlan> {
+    return parseFixPlan(await this.request('tooling/planFix', { profiles, installDirectory, packageManager, allowFallback, runDirectory }, signal, 300000));
   }
-  async applyFix(planId: string, progress: (value: FixProgress) => void, signal?: AbortSignal): Promise<FixResult> {
-    const operationId = randomUUID(); let sequence = 0; let finished = false; let failure: Error | undefined;
+  async applyFix(planId: string, progress: (value: FixProgress) => void, signal?: AbortSignal, operationId: string = randomUUID()): Promise<FixResult> {
+    let sequence = 0; let finished = false; let failure: Error | undefined;
     const subscription = this.connection.onNotification('tooling/fixProgress', (value: unknown) => {
       try {
         const event = parseFixProgress(value);

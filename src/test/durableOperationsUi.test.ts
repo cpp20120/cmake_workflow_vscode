@@ -18,18 +18,41 @@ const manifest = { fsPath: '/workspace/workflow.json' } as vscode.Uri;
 let starts = 0, cancels = 0, finds = 0, inspections = 0, panels: string[] = [];
 let failStart = false;
 let terminalState: string | null = null;
+let historyEnabled = false;
+let historyRetries = 0;
+let selectedPolicy: import('../historyProtocol').HistoryPolicy | undefined;
+let recoveryRevision = 0;
+let confirmRecovery = false;
+const recoveryCalls: number[] = [];
 const id = 'a'.repeat(32), hash = 'b'.repeat(64);
 const op = { operationId: id, clientRequestId: 'request', workspaceId: 'workspace', kind: 'workflow',
   state: 'accepted_not_dispatched', manifestSha256: hash, manifestBaseDirectory: '/workspace' };
 const recovery = { operationId: id, acceptanceState: 'dispatch_authorized', terminalState: null,
   cancellationRequested: false, runDirectory: null, checkpointSha256: null, decision: null, revision: 0, note: null };
 const fakeClient = {
-  supports: () => true,
+  supports: (method: string) => historyEnabled || (method !== 'workflow/historyPolicy' && method !== 'history/indexStatus'),
+  listOperations: async () => ({ schemaVersion: 1, items: [], nextCursor: null }),
+  preflightWorkflow: async (request: import('../durableProtocol').WorkflowPreflightRequest) =>
+    ({ plan: { valid: true }, historyPolicy: request.historyPolicy }),
+  retryHistoryIndex: async () => {
+    historyRetries++;
+    return { operationId: id, state: 'indexed', databasePath: '/workspace/custom.sqlite', updatedAt: null, diagnosticCode: null };
+  },
   planWorkflow: async () => ({ schemaVersion: 1, valid: true, manifestHash: hash, workflow: manifest.fsPath, nodes: [] }),
-  startWorkflow: async () => { starts++; if (failStart) { throw Error('lost response'); } return op; },
+  startWorkflow: async (request: import('../durableProtocol').WorkflowStartRequest) => { starts++; selectedPolicy = request.historyPolicy; if (failStart) { throw Error('lost response'); } return op; },
   findOperation: async () => { finds++; return op; },
   getOperation: async () => op,
-  inspectOperation: async () => { inspections++; return { ...recovery, terminalState }; },
+  inspectOperation: async () => { inspections++; return { ...recovery, terminalState, revision: recoveryRevision,
+    decision: recoveryRevision ? 'needs_attention' : null }; },
+  operationOverview: async () => ({ schemaVersion: 1, operation: op, isFinalized: true,
+    nodes: [{ id: 'build', kind: 'build', status: 'failed', dependencies: ['configure'],
+      startedAt: null, finishedAt: null, exitCode: 2, error: '<compiler error>', stdout: null, stderr: 'build.err' }] }),
+  reconcileOperation: async (_id: string, revision: number, decision: string, note: string) => {
+    assert.equal(decision, 'needs_attention'); assert.equal(note, 'Processes verified stopped');
+    recoveryCalls.push(revision); recoveryRevision = 1;
+  },
+  admitOperationResume: async (_id: string, revision: number) => { recoveryCalls.push(revision); recoveryRevision = 2; },
+  executeOperationResume: async (_id: string, revision: number) => { recoveryCalls.push(revision); },
   operationEvents: async (_id: string, afterSequence: number) => ({ operationId: id, afterSequence,
     nextSequence: afterSequence, hasMore: false, events: [] }),
   cancelOperation: async (_id: string, rev: number) => { assert.equal(rev, 0); cancels++; return { operationId: id, state: 'cancel_requested', revision: 1, requested: true }; },
@@ -43,7 +66,10 @@ const ui = {
   window: {
     registerTreeDataProvider: (_id: string, view: unknown) => { assert.ok(view); return { dispose() {} }; },
     showInformationMessage: async () => undefined,
-    showWarningMessage: async () => 'Request Cancellation',
+    showWarningMessage: async (_prompt: string, _options: unknown, action: string) =>
+      action === 'Request Cancellation' || confirmRecovery ? action : undefined,
+    showQuickPick: async (items: unknown[]) => historyEnabled ? items.find(item => (item as { mode?: string }).mode === 'ExplicitDatabase') : items[0],
+    showInputBox: async () => historyEnabled ? 'custom.sqlite' : 'Processes verified stopped',
     withProgress: async (_options: unknown, callback: (p: { report(msg: unknown): void }, token: unknown) => Promise<void>) =>
       callback({ report: () => {} }, { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) }),
   },
@@ -70,7 +96,6 @@ loader._load = (name, ...args) => {
   if (name === './hostProcess') { return { HostProcess: MockHostProcess }; }
   if (name === './settings') { return { configuredJobs: () => undefined }; }
   if (name === './toolEnvironment') { return { toolDirectory: () => null, toolEnvironment: () => undefined }; }
-  if (name === './inspectionHtml') { return { escapeHtml: (s: string) => s }; }
   return oldLoad(name, ...args);
 };
 const { registerDurableCommands } = require('../durableCommands') as typeof import('../durableCommands');
@@ -84,7 +109,7 @@ function environment() {
   const services = {
     register: (name: string, fn: (...args: unknown[]) => Promise<void>) => { commands.set(name, fn); },
     trusted: () => true, choose: async () => ({ folder, file: manifest }), folder: async () => folder,
-    onPlan: () => {}, onEvent: () => {}, onReport: async () => {}, status: () => {},
+    onPlan: () => {}, onReport: async () => {}, status: () => {},
     show: (_name: string, body: string) => { panels.push(body); },
   };
   registerDurableCommands(context, services, { append: () => {}, appendLine: () => {} } as unknown as vscode.OutputChannel);
@@ -149,4 +174,58 @@ test('pending admission is resolved before an older last operation', async () =>
   assert.equal((e.saved.get('durableOperation:file:///workspace') as { operationId: string }).operationId, id);
   assert.ok((e.saved.get('durableOperations:file:///workspace') as { operationId: string }[])
     .some(item => item.operationId === id));
+});
+
+test('recovery uses one confirmed action per observed Host revision', async () => {
+  terminalState = null;
+  const e = environment();
+  e.saved.set('durableOperation:file:///workspace', { operationId: id, clientRequestId: 'request' });
+  const recover = () => e.commands.get('cmakeWorkflow.recoverDurableOperation')!({
+    folderKey: folder.uri.toString(), operationId: id,
+  });
+  await recover();
+  assert.deepEqual(recoveryCalls, []);
+  confirmRecovery = true;
+  try {
+    await recover();
+    assert.deepEqual(recoveryCalls, [0]);
+    await recover();
+    assert.deepEqual(recoveryCalls, [0, 1]);
+    await recover();
+    assert.deepEqual(recoveryCalls, [0, 1, 2]);
+  } finally { confirmRecovery = false; recoveryRevision = 0; }
+});
+
+test('Host workflow forwards the selected History policy and index retry never submits execution', async () => {
+  const e = environment();
+  historyEnabled = true;
+  failStart = false;
+  starts = 0;
+  historyRetries = 0;
+  try {
+    await e.commands.get('cmakeWorkflow.runDurableWorkflow')!();
+    assert.deepEqual(selectedPolicy, { mode: 'ExplicitDatabase', databasePath: '/workspace/custom.sqlite' });
+    assert.equal(starts, 1);
+    await e.commands.get('cmakeWorkflow.retryHistoryIndex')!({ folderKey: folder.uri.toString(), operationId: id });
+    assert.equal(historyRetries, 1);
+    assert.equal(starts, 1);
+  } finally { historyEnabled = false; }
+});
+
+test('Operation details, node details and raw events open independently', async () => {
+  const e = environment();
+  terminalState = 'failed';
+  panels = [];
+  try {
+    await e.commands.get('cmakeWorkflow.runDurableWorkflow')!();
+    const operation = { folderKey: folder.uri.toString(), operationId: id };
+    await e.commands.get('cmakeWorkflow.openDurableOperation')!(operation);
+    assert.match(panels[0], /Select a node/);
+    assert.doesNotMatch(panels[0], /Event cursor|<table>/);
+    await e.commands.get('cmakeWorkflow.openOperationNode')!({ ...operation, nodeId: 'build' });
+    assert.match(panels[1], /configure/);
+    assert.match(panels[1], /&lt;compiler error&gt;/);
+    await e.commands.get('cmakeWorkflow.openOperationEvents')!(operation);
+    assert.match(panels[2], /0 events/);
+  } finally { terminalState = null; }
 });

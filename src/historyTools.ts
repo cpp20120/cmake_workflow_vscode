@@ -4,9 +4,9 @@ import type { TrendSample } from './historyTrend';
 
 export async function metricFilters(metric: string, rows: {
   metric: string; variant: string | null; scenario: string | null;
-}[]): Promise<string[] | undefined> {
+}[]): Promise<{ variant?: string; scenario?: string } | undefined> {
   let matching = rows.filter(row => row.metric === metric);
-  const args: string[] = [];
+  const filters: { variant?: string; scenario?: string } = {};
   for (const field of ['variant', 'scenario'] as const) {
     const names = [...new Set(matching.map(row => row[field]).filter((v): v is string => typeof v === 'string' && v.length > 0))];
     if (!names.length) { continue; }
@@ -14,11 +14,11 @@ export async function metricFilters(metric: string, rows: {
       ...names.map(value => ({ label: value, value }))], { placeHolder: `Filter ${metric} by ${field}` });
     if (!chosen) { return; }
     if (chosen.value !== undefined) {
-      args.push(`--${field}`, chosen.value);
+      filters[field] = chosen.value;
       matching = matching.filter(row => row[field] === chosen.value);
     }
   }
-  return args;
+  return filters;
 }
 
 export function metricsHtml(samples: TrendSample[]): string {

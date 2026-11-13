@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { inspectContext, type InspectedContext } from './inspectionHtml';
-import { parseHistoryDetail } from './protocol';
+import type { HistoryDetail } from './protocol';
 import { parseProgramArguments, profileReplayArguments, profileRunArguments, replayChoices } from './profileActions';
+import { profileOutputRoot } from './savedProfiles';
 
 interface Services {
   register(name: string, action: () => Promise<void>): void;
@@ -10,9 +11,9 @@ interface Services {
   folder(): Promise<vscode.WorkspaceFolder | undefined>;
   pair(): Promise<[vscode.WorkspaceFolder, string, string] | undefined>;
   call(folder: vscode.WorkspaceFolder, args: string[]): Promise<string>;
-  historyArgs(folder: vscode.WorkspaceFolder, args: string[]): string[];
+  historyDetail(folder: vscode.WorkspaceFolder, id: string): Promise<HistoryDetail>;
   database(folder: vscode.WorkspaceFolder): string | undefined;
-  execute(folder: vscode.WorkspaceFolder, args: string[], directory?: string): Promise<void>;
+  execute(folder: vscode.WorkspaceFolder, args: string[]): Promise<void>;
 }
 
 async function directory(folder: vscode.WorkspaceFolder, label: string): Promise<string | undefined> {
@@ -40,9 +41,10 @@ async function captureOptions(folder: vscode.WorkspaceFolder, replay = false): P
   if (timeout === undefined) { return; }
   const configured = vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<string>('resultsDir');
   const results = await vscode.window.showInputBox({ prompt: 'Parent directory for saved profile results (relative to workspace or absolute)',
-    value: configured || path.join('out', 'profiles'), validateInput: text => text.trim() && !text.includes('\0') ? undefined : 'Enter a directory.' });
+    value: configured?.trim() || path.relative(folder.uri.fsPath, profileOutputRoot(folder.uri.fsPath)),
+    validateInput: text => text.trim() && !text.includes('\0') ? undefined : 'Enter a directory.' });
   if (results === undefined) { return; }
-  return { backend, timeout, results: path.resolve(folder.uri.fsPath, results) };
+  return { backend, timeout, results: path.resolve(folder.uri.fsPath, results.trim()) };
 }
 
 export function registerProfileCommands(services: Services): void {
@@ -97,8 +99,7 @@ export function registerProfileCommands(services: Services): void {
     if (!services.trusted()) { return; }
     const pair = await services.pair(); if (!pair) { return; }
     const [folder, baseline, candidate] = pair;
-    const [before, after] = await Promise.all([baseline, candidate].map(async id =>
-      parseHistoryDetail(JSON.parse(await services.call(folder, services.historyArgs(folder, ['history', 'show', id, '--json']))))));
+    const [before, after] = await Promise.all([baseline, candidate].map(id => services.historyDetail(folder, id)));
     const choices = replayChoices(before, after);
     if (!choices.length) { throw Error('No shared run nodes or indexed DagFlow cases with available saved runs. Replay needs preserved run reports and binaries.'); }
     const picked = await vscode.window.showQuickPick(choices.map(choice => ({ label: choice.node,
@@ -108,12 +109,5 @@ export function registerProfileCommands(services: Services): void {
     const capture = await captureOptions(folder, true); if (!capture) { return; }
     await services.execute(folder, profileReplayArguments(before.run.directory, after.run.directory,
       picked.choice, capture.backend, capture.timeout, capture.results, services.database(folder)));
-  });
-
-  services.register('cmakeWorkflow.profileAnalyze', async () => {
-    if (!services.trusted()) { return; }
-    const folder = await services.folder(); if (!folder) { return; }
-    const saved = await directory(folder, 'Analyze Saved Profile Captures'); if (!saved) { return; }
-    await services.execute(folder, ['profile', 'analyze', saved], saved);
   });
 }

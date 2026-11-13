@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { ResponseError } from 'vscode-jsonrpc/node';
+import type { HistoryRunsRequest } from './applicationProtocol';
 import { randomBytes } from 'node:crypto';
 import { CliClient, cliFailure } from './cli';
 import { configuredJobs, resolveHistoryDatabase } from './settings';
@@ -9,12 +11,14 @@ import { builtInPresets, defaultPreset, parseCustomPresets, type ChartPreset, ty
 import { parseHarness } from './dagflowHarness';
 import { renderHarnessHtml } from './harnessHtml';
 import { automaticBaselines, hasCompatibleMeasurements } from './autoResults';
-import { contextHtml, informationHtml, inspectContext, resolvedTargetHtml, toolingPlanHtml, toolingProfiles } from './inspectionHtml';
+import { contextHtml, escapeHtml, informationHtml, resolvedTargetHtml, toolingPlanHtml, toolingProfiles } from './inspectionHtml';
 import { loadComparisonEvidence, loadStandaloneProfileEvidence } from './profileEvidence';
 import { presentProfileResults } from './profileResults';
 import { registerProfileCommands } from './profileCommands';
 import { executeProfile } from './profileExecution';
+import { findSavedProfiles, isProfileResultFile, profileOutputRoot } from './savedProfiles';
 import { registerNativeCommands } from './nativeCommands';
+import { openHostApi } from './hostApiCommands';
 import { registerHostDoctor } from './hostDoctor';
 import { registerDurableCommands } from './durableCommands';
 import { toolDirectory, toolEnvironment } from './toolEnvironment';
@@ -22,9 +26,9 @@ import { registerCampaignCommands } from './campaignCommands';
 import type { CommandServices } from './commandUi';
 import { metricFilters, metricsHtml } from './historyTools';
 import { historyRunFromCommand } from './historySelection';
-import { planGraphHtml } from './runVisuals';
-import { parseTrendSamples, renderTrendHtml, trendIdentity, trendLabel } from './historyTrend';
-import { EventSequence, parseEvent, parseHistory, parseHistoryDetail, parseHistoryComparison, parseHistoryDetection, parsePlan, parseReport, type Artifact, type Event, type HistoryDetail, type HistoryRun, type Plan, type PlanNode, type NodeStatus, type Report } from './protocol';
+import { planGraphHtml, reportGraphHtml, timelineHtml } from './runVisuals';
+import { renderTrendHtml, trendIdentity, trendLabel } from './historyTrend';
+import { EventSequence, parseEvent, parsePlan, parseReport, type Artifact, type Event, type HistoryDetail, type HistoryRun, type Plan, type PlanNode, type NodeStatus, type Report } from './protocol';
 
 interface Selection { folder: vscode.WorkspaceFolder; file: vscode.Uri }
 interface NodeState { node: PlanNode; status: NodeStatus; artifacts: Artifact[]; error?: string }
@@ -63,6 +67,7 @@ class WorkflowTree implements vscode.TreeDataProvider<Item> {
         child.tooltip = `${state.node.target}\n${state.node.buildDirectory}`;
         child.iconPath = new vscode.ThemeIcon(({ pending:'circle-outline', running:'sync~spin', succeeded:'pass-filled', failed:'error', blocked:'debug-pause', canceled:'circle-slash', needs_attention:'warning', outcome_unknown:'question' } as Record<NodeStatus,string>)[state.status]);
         child.contextValue = 'cmakeWorkflowNode';
+        child.command = { command: 'cmakeWorkflow.openPlannedNode', title: 'Open Node Details', arguments: [child] };
         return child;
       })];
     }
@@ -102,33 +107,55 @@ export function activate(context: vscode.ExtensionContext): void {
   const trackPanel = (panel: vscode.WebviewPanel): void => { panels.add(panel); panel.onDidDispose(() => panels.delete(panel)); };
   context.subscriptions.push(output, tree, history, vscode.window.registerTreeDataProvider('cmakeWorkflow.workflows', tree), vscode.window.registerTreeDataProvider('cmakeWorkflow.history', history));
   context.subscriptions.push({ dispose: () => { for (const panel of panels) { panel.dispose(); } panels.clear(); } });
-  const selected = new Map<string, Selection>(); const lastRuns = new Map<string, string>();
+  const selected = new Map<string, Selection>();
+  const lastRuns = new Map<string, { directory: string; operationId?: string }>();
   // Only explicit user selections pin a baseline; automatic selections should
   // advance to the latest compatible predecessor on the next run.
   const manuallyPinnedBaselines = new Map<string, string>();
   for (const folder of vscode.workspace.workspaceFolders ?? []) { const value = context.workspaceState.get<string>(`workflow:${folder.uri.toString()}`); if (value) { selected.set(folder.uri.toString(), { folder, file: vscode.Uri.file(value) }); } }
-  let current: Selection | undefined = [...selected.values()][0]; let historyFolder: vscode.WorkspaceFolder | undefined = current?.folder; if (current) { tree.set(current); history.setFolder(current.folder.uri.toString()); }
+  let current: Selection | undefined = [...selected.values()][0]; let historyFolder: vscode.WorkspaceFolder | undefined = current?.folder; if (current) { tree.set(current); }
+  const initialHistoryFolder = current?.folder ?? (vscode.workspace.workspaceFolders?.length === 1 ? vscode.workspace.workspaceFolders[0] : undefined);
+  if (initialHistoryFolder) { history.setFolder(initialHistoryFolder.uri.toString()); }
   const reportError = (error: unknown): void => { const text = error instanceof Error ? error.message : String(error); tree.status(`Error: ${text}`); output.appendLine(text); output.show(true); if (text.includes('ENOENT')) { void vscode.window.showErrorMessage(`CMakeWorkflow: ${text}. Choose the CLI executable for this workspace.`, 'Choose CLI Executable').then(choice => { if (choice) { void vscode.commands.executeCommand('cmakeWorkflow.configureCli'); } }); } else { void vscode.window.showErrorMessage(`CMakeWorkflow: ${text}`); } };
   const trusted = (): boolean => { if (!vscode.workspace.isTrusted) { reportError('Trust this workspace before running CMakeWorkflow.'); return false; } return true; };
   const clientFor = (folder: vscode.WorkspaceFolder): CliClient => { const config = vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri); const executable = config.get<string>('executable', 'CMakeWorkflow').trim(); const prefixArgs = config.get<string[]>('prefixArgs', []); if (!executable || !Array.isArray(prefixArgs) || !prefixArgs.every(x => typeof x === 'string')) { throw Error('Configure cmakeWorkflow.executable and prefixArgs.'); } return new CliClient({ executable, prefixArgs, cwd: folder.uri.fsPath, env: toolEnvironment(toolDirectory(config.get<string>('toolingInstallDirectory', ''), folder.uri.fsPath)) }); };
-  const historyDb = (folder: vscode.WorkspaceFolder): string | undefined => resolveHistoryDatabase(folder.uri.fsPath, vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<string>('historyDb', ''));
+  const historyDatabaseOverrides = new Map<string, string>();
+  const historyDb = (folder: vscode.WorkspaceFolder): string =>
+    historyDatabaseOverrides.get(folder.uri.toString()) ??
+    resolveHistoryDatabase(folder.uri.fsPath, vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<string>('historyDb', ''))
+    ?? path.join(folder.uri.fsPath, '.cmakeworkflow', 'history.sqlite');
   const historyLimit = (folder: vscode.WorkspaceFolder): string => {
     const value = vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<number>('historyLimit', 50);
     if (!Number.isSafeInteger(value) || value < 1 || value > 2147483647) { throw Error('cmakeWorkflow.historyLimit must be an integer from 1 to 2147483647.'); }
     return String(value);
   };
   const noHistory = (folder: vscode.WorkspaceFolder): boolean => vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<boolean>('noHistory', false);
-  const historyArgs = (folder: vscode.WorkspaceFolder, args: string[]): string[] => { const database = historyDb(folder); return database ? [...args, '--db', database] : args; };
   const call = async (folder: vscode.WorkspaceFolder, args: string[]): Promise<string> => { const client = clientFor(folder); activeClients.add(client); try { output.appendLine(`Running ${args.join(' ')}`); const result = await client.run(args, undefined, text => output.append(text)); const problem = messageFor(result, args.slice(0, 2).join(' ')); if (problem) { throw Error(problem); } return result.stdout; } finally { activeClients.delete(client); client.dispose(); } };
   const callWithCodes = async (folder: vscode.WorkspaceFolder, args: string[], accepted: number[]): Promise<string> => { const client = clientFor(folder); activeClients.add(client); try { output.appendLine(`Running ${args.join(' ')}`); const result = await client.run(args, undefined, text => output.append(text)); if (result.spawnError || result.signal || !accepted.includes(result.code ?? -1)) { throw Error(messageFor(result, args.slice(0, 2).join(' ')) ?? 'CLI failed'); } return result.stdout; } finally { activeClients.delete(client); client.dispose(); } };
-  const infoPanel = (title: string, body: string): vscode.WebviewPanel => { const panel = vscode.window.createWebviewPanel('cmakeWorkflow.information', title, vscode.ViewColumn.Active, { enableScripts: false }); panel.webview.html = informationHtml(title, body, randomBytes(16).toString('base64')); trackPanel(panel); return panel; };
+  const detailPanels = new Map<string, vscode.WebviewPanel>();
+  const infoPanel = (title: string, body: string, key?: string): vscode.WebviewPanel => {
+    const existing = key ? detailPanels.get(key) : undefined;
+    const panel = existing ?? vscode.window.createWebviewPanel(
+      'cmakeWorkflow.information', title, vscode.ViewColumn.Active, { enableScripts: false });
+    if (!existing) {
+      trackPanel(panel);
+      if (key) {
+        detailPanels.set(key, panel);
+        panel.onDidDispose(() => detailPanels.delete(key));
+      }
+    }
+    panel.title = title;
+    panel.webview.html = informationHtml(title, body, randomBytes(16).toString('base64'));
+    if (existing) { panel.reveal(); }
+    return panel;
+  };
   const selectFolder = async (): Promise<vscode.WorkspaceFolder | undefined> => { const folders = vscode.workspace.workspaceFolders ?? []; if (!folders.length) { reportError('Open a workspace folder first.'); return; } if (folders.length === 1) { return folders[0]; } const choice = await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, folder })), { placeHolder: 'Choose workspace folder' }); return choice?.folder; };
   const selectWorkflow = async (): Promise<Selection | undefined> => { const folder = await selectFolder(); if (!folder) { return; } const files = await vscode.window.showOpenDialog({ defaultUri: folder.uri, canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'JSON workflow': ['json'] }, openLabel: 'Select Workflow' }); const file = files?.[0]; if (!file) { return; } if (vscode.workspace.getWorkspaceFolder(file)?.uri.toString() !== folder.uri.toString()) { throw Error('Select a workflow in the chosen workspace folder.'); } const selection = { folder, file }; selected.set(folder.uri.toString(), selection); current = selection; historyFolder = folder; history.setFolder(folder.uri.toString()); await context.workspaceState.update(`workflow:${folder.uri.toString()}`, file.fsPath); tree.set(selection); return selection; };
   const choose = async (): Promise<Selection | undefined> => current ?? selectWorkflow();
   const plan = async (selection: Selection, only?: string[], allowInvalid = false): Promise<Plan> => { const client = clientFor(selection.folder); activeClients.add(client); tree.status('Planning…'); try { const args = ['workflow','plan',selection.file.fsPath,'--json']; for (const id of only ?? []) { args.push('--only', id); } const result = await client.run(args, undefined, text => output.append(text)); if (result.spawnError || result.signal) { throw Error(messageFor(result, 'Plan workflow')); } let parsed: Plan; try { parsed = parsePlan(JSON.parse(result.stdout)); } catch (error) { throw Error(`Invalid plan JSON: ${String(error)}${result.stderr ? `\n${result.stderr}` : ''}`); } tree.set(selection, parsed); output.appendLine(`Plan: ${parsed.valid ? 'valid' : 'invalid'}; ${parsed.nodes.length} nodes`); for (const node of parsed.nodes) { output.appendLine(`${node.id}: ${node.kind} ${node.target}; build=${node.buildDirectory}; config=${node.configuration ?? '(none)'}; after=[${node.dependencies.join(', ')}]; observed=${node.observedState}; resources=[${node.resources.join(', ')}]${node.exclusive ? '; exclusive' : ''}`); for (const diagnostic of node.diagnostics) { output.appendLine(`  ${diagnostic.severity}: ${diagnostic.message}`); } } if ((result.code !== 0 || !parsed.valid) && !allowInvalid) { throw Error(`Workflow plan invalid (exit ${result.code}). Expand nodes in the CMakeWorkflow view for diagnostics.`); } return parsed; } finally { activeClients.delete(client); client.dispose(); } };
   const openReport = async (folder: vscode.WorkspaceFolder, directory: string, showFile = false): Promise<Report> => { let report: Report; try { report = parseReport(JSON.parse(await call(folder, ['workflow','report',directory,'--json']))); } catch (error) { throw Error(`Report unavailable or incomplete: ${String(error)}`); } await tree.report(report, directory); tree.status(`Run ${report.status} • ${report.nodes.length} nodes`); output.appendLine(`Report: ${report.status}${report.error ? ` — ${report.error}` : ''}`); for (const node of report.nodes) { output.appendLine(`${node.id}: ${node.status}${node.error ? ` — ${node.error}` : ''}`); } if (showFile) { const uri = vscode.Uri.file(path.join(directory, 'run.json')); try { await vscode.workspace.fs.stat(uri); await vscode.window.showTextDocument(uri); } catch { void vscode.window.showWarningMessage('Report was read by the CLI, but run.json is unavailable at the reported path.'); } } return report; };
   const historyContext = async (): Promise<vscode.WorkspaceFolder | undefined> => { const folder = historyFolder ?? current?.folder ?? await selectFolder(); if (folder) { historyFolder = folder; history.setFolder(folder.uri.toString()); } return folder; };
-  const historyFilters = new Map<string, string[]>();
+  const historyFilters = new Map<string, Omit<HistoryRunsRequest, 'databasePath' | 'limit'>>();
   const presetsFor = (folder: vscode.WorkspaceFolder): ChartPreset[] => [...builtInPresets, ...parseCustomPresets(vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<unknown>('chartPresets', []))];
   const activePreset = (folder: vscode.WorkspaceFolder, source: ChartSource): ChartPreset => {
     const id = context.workspaceState.get<string>(`chartPreset:${source}:${folder.uri.toString()}`);
@@ -148,10 +175,46 @@ export function activate(context: vscode.ExtensionContext): void {
     const [summary, runs] = await Promise.all([vscode.workspace.fs.readFile(summaryUri), vscode.workspace.fs.readFile(runsUri)]);
     return parseHarness(JSON.parse(Buffer.from(summary).toString('utf8')), Buffer.from(runs).toString('utf8'));
   };
-  const refreshHistory = async (): Promise<void> => { const folder = await historyContext(); if (!folder) { return; } const runs = parseHistory(JSON.parse(await call(folder, historyArgs(folder, ['history','runs','--limit',historyLimit(folder),...(historyFilters.get(folder.uri.toString()) ?? []),'--json'])))); history.setRuns(folder.uri.toString(), runs); };
+  const readHistoryRuns = async (folder: vscode.WorkspaceFolder, filtered = true) => {
+    const limit = Number(historyLimit(folder));
+    const request = { databasePath: historyDb(folder), ...(filtered ? historyFilters.get(folder.uri.toString()) : undefined) };
+    const catalog = { database: request.databasePath, filtered: Object.values(historyFilters.get(folder.uri.toString()) ?? {}).some(Boolean), missing: false };
+    try {
+      const runs = await withHost(folder, async client => {
+        if (!client.supports('history/runsPage')) { return client.historyRuns({ ...request, limit }); }
+        const items: HistoryRun[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await client.historyRunsPage({ ...request, cursor, limit: Math.min(200, limit - items.length) });
+          items.push(...page.items);
+          if (page.nextCursor !== null && page.nextCursor === cursor) { throw Error('Host History cursor did not advance'); }
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor && items.length < limit);
+        return items;
+      });
+      return { runs, catalog };
+    } catch (error) {
+      if (error instanceof ResponseError && error.code === 1001 &&
+        (error.data as { code?: string } | undefined)?.code === 'not_found') { return { runs: [] as HistoryRun[], catalog: { ...catalog, missing: true } }; }
+      throw error;
+    }
+  };
+  const historyDetail = (folder: vscode.WorkspaceFolder, id: string) =>
+    withHost(folder, client => client.historyShow(historyDb(folder), id));
+  const compareHistory = (folder: vscode.WorkspaceFolder, baselineRunId: string, candidateRunId: string) =>
+    withHost(folder, client => client.historyCompare({ databasePath: historyDb(folder), baselineRunId, candidateRunId }));
+  const refreshHistory = async (): Promise<void> => {
+    const folder = await historyContext(); if (!folder) { return; }
+    const { runs, catalog } = await readHistoryRuns(folder);
+    history.setRuns(folder.uri.toString(), runs, catalog);
+    if (!runs.length) {
+      try { await refreshLatestHistoryStatus(folder); }
+      catch (error) { output.appendLine(`Latest History status: ${String(error)}`); }
+    }
+  };
   const pickHistoryRun = async (role: string, excludeId?: string): Promise<HistoryRun | undefined> => { if (!trusted()) { return; } if (!history.runs().length) { await refreshHistory(); } const choices = history.runs().filter(run => run.id !== excludeId); if (!choices.length) { void vscode.window.showInformationMessage('No other indexed CMakeWorkflow run was found.'); return; } const picked = await vscode.window.showQuickPick(choices.map(run => ({ label: `${run.status} • ${path.basename(run.workflow ?? run.directory)}`, description: run.startedAt ?? run.id.slice(0, 12), detail: run.id, run })), { placeHolder: `Choose ${role.toLowerCase()} run` }); return picked?.run; };
   const comparisonPair = async (): Promise<[vscode.WorkspaceFolder, string, string] | undefined> => { const folder = await historyContext(); if (!folder || !trusted()) { return; } let pair = history.pair(); if (!pair) { const baseline = await pickHistoryRun('Baseline'); if (!baseline) { return; } history.setBaseline(baseline); manuallyPinnedBaselines.set(folder.uri.toString(), baseline.id); const candidate = await pickHistoryRun('Candidate', baseline.id); if (!candidate) { return; } history.setCandidate(candidate); pair = history.pair(); } if (!pair) { return; } if (pair[0] === pair[1]) { void vscode.window.showWarningMessage('Choose two different runs for baseline and candidate.'); return; } return [folder, pair[0], pair[1]]; };
-  const showHistoryDetail = async (run: HistoryRun): Promise<void> => { const folder = await historyContext(); if (!folder || !trusted()) { return; } const detail = parseHistoryDetail(JSON.parse(await call(folder, historyArgs(folder, ['history','show',run.id,'--json'])))); let report: Report | undefined; if (detail.run.format === 'workflow' && detail.run.sourceAvailable) { try { report = parseReport(JSON.parse(await call(folder, ['workflow','report',detail.run.directory,'--json']))); } catch (error) { output.appendLine(`Saved workflow report unavailable: ${String(error)}`); } } trackPanel(openHistoryPanel(detail, activePreset(folder, 'history'), report)); };
+  const showHistoryDetail = async (run: HistoryRun): Promise<void> => { const folder = await historyContext(); if (!folder || !trusted()) { return; } const detail = await historyDetail(folder, run.id); let report: Report | undefined; if (detail.run.format === 'workflow' && detail.run.sourceAvailable) { try { report = (await withHost(folder, client => client.getRun(detail.run.directory))).report; } catch (error) { output.appendLine(`Saved workflow report unavailable: ${String(error)}`); } } trackPanel(openHistoryPanel(detail, activePreset(folder, 'history'), report)); };
   const register = (name: string, fn: (...args: unknown[]) => Promise<void>): void => { context.subscriptions.push(vscode.commands.registerCommand(name, (...args: unknown[]) => { void fn(...args).catch(reportError); })); };
   const nativeServices: CommandServices = { register, trusted, folder: historyContext, call,
     show: (title, body) => { infoPanel(title, body); },
@@ -183,18 +246,30 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   registerNativeCommands(nativeServices);
   registerHostDoctor(context, { ...nativeServices, folder: selectFolder }, output);
-  registerDurableCommands(context, {
+  const { withHost, runNode, refreshLatestHistoryStatus } = registerDurableCommands(context, {
     register, trusted, choose, folder: selectFolder,
     onPlan: (selection, planned) => tree.set(selection, planned),
-    onEvent: event => tree.event(event),
-    onReport: async (folder, report, directory) => {
+    onHistoryStatus: (folder, status) => history.setIndexStatus(folder.uri.toString(), status),
+    onReport: async (folder, report, directory, operationId) => {
       await tree.report(report, directory);
-      lastRuns.set(folder.uri.toString(), directory);
+      lastRuns.set(folder.uri.toString(), { directory, operationId });
       tree.status(`Host run ${report.status} • ${report.nodes.length} nodes`);
     },
+    openHistoryDatabase: async (folder, databasePath) => {
+      historyFolder = folder;
+      history.setFolder(folder.uri.toString());
+      historyDatabaseOverrides.set(folder.uri.toString(), databasePath);
+      history.clearSelection();
+      manuallyPinnedBaselines.delete(folder.uri.toString());
+      await refreshHistory();
+      await vscode.commands.executeCommand('cmakeWorkflow.history.focus');
+    },
     status: message => tree.status(message),
-    show: (title, body) => { infoPanel(title, body); },
+    show: (title, body, panelKey) => { infoPanel(title, body, panelKey); },
   }, output);
+  register('cmakeWorkflow.openHostApi', () => openHostApi({
+    trusted, folder: selectFolder, withHost, track: trackPanel,
+  }));
   registerCampaignCommands(nativeServices);
   register('cmakeWorkflow.selectWorkflow', async () => { await selectWorkflow(); });
   register('cmakeWorkflow.configureCli', async () => { const folder = current?.folder ?? await selectFolder(); if (!folder) { return; } const mode = await vscode.window.showQuickPick([
@@ -209,21 +284,30 @@ export function activate(context: vscode.ExtensionContext): void {
     void vscode.window.showInformationMessage(`CMakeWorkflow CLI configured for ${folder.name}. Use Plan in the sidebar.`);
   });
   register('cmakeWorkflow.openArtifact', async (value: unknown) => { if (typeof value !== 'string') { return; } await vscode.window.showTextDocument(vscode.Uri.file(value)); });
-  register('cmakeWorkflow.planWorkflow', async () => { if (!trusted()) { return; } const selection = await choose(); if (selection) { await plan(selection); } });
-  register('cmakeWorkflow.showWorkflowGraph', async () => { if (!trusted()) { return; } const selection = await choose(); if (!selection) { return; } const planned = await plan(selection, undefined, true); infoPanel(`Workflow graph: ${path.basename(selection.file.fsPath)}`, `<p>${planned.nodes.length} nodes • ${planned.valid ? 'valid' : 'invalid'} plan</p>${planGraphHtml(planned)}`); });
-  const runWorkflow = async (only?: string[], chosen?: Selection): Promise<void> => {
+  const planViaHost = async (selection: Selection): Promise<Plan> => {
+    tree.status('Planning via Host…');
+    const planned = await withHost(selection.folder, client => client.planWorkflow(selection.file.fsPath));
+    tree.set(selection, planned);
+    return planned;
+  };
+  register('cmakeWorkflow.planWorkflow', async () => {
     if (!trusted()) { return; }
-    const selection = chosen ?? await choose(); if (!selection) { return; }
-    const planned = await plan(selection, only);
-    if (only?.length) { const confirmation = await vscode.window.showQuickPick([{ label: `Run ${only.join(", ")} and its dependency closure (${planned.nodes.length} nodes)`, value: true }], { placeHolder: 'Review the planned dependency closure in the Workflow view, then confirm' }); if (!confirmation) { return; } }
+    const selection = await choose(); if (!selection) { return; }
+    if (!(await planViaHost(selection)).valid) { throw Error('Host workflow plan is invalid. Expand its nodes for diagnostics.'); }
+  });
+  register('cmakeWorkflow.showWorkflowGraph', async () => { if (!trusted()) { return; } const selection = await choose(); if (!selection) { return; } const planned = await planViaHost(selection); infoPanel(`Workflow graph: ${path.basename(selection.file.fsPath)}`, `<p>${planned.nodes.length} nodes • ${planned.valid ? 'valid' : 'invalid'} plan</p>${planGraphHtml(planned)}`); });
+  const runWorkflow = async (): Promise<void> => {
+    if (!trusted()) { return; }
+    const selection = await choose(); if (!selection) { return; }
+    await plan(selection);
     const config = vscode.workspace.getConfiguration('cmakeWorkflow', selection.folder.uri);
     const args = ['workflow', 'run', selection.file.fsPath, '--json'];
-    for (const id of only ?? []) { args.push('--only', id); }
     const jobs = configuredJobs(config.inspect<number>('jobs'));
     if (jobs !== undefined) { args.push('--jobs', String(jobs)); }
     const results = config.get<string>('resultsDir');
     if (results) { args.push('--results-dir', results); }
-    const database = historyDb(selection.folder);
+    const database = resolveHistoryDatabase(selection.folder.uri.fsPath, config.get<string>('historyDb', ''))
+      ?? path.join(selection.folder.uri.fsPath, '.cmakeworkflow', 'history.sqlite');
     if (noHistory(selection.folder)) { args.push('--no-history'); } else if (database) { args.push('--history-db', database); }
     const client = clientFor(selection.folder);
     activeClients.add(client);
@@ -253,12 +337,12 @@ export function activate(context: vscode.ExtensionContext): void {
           try { sequence.finish(); } catch (error) { streamError = error as Error; }
           let saved: Report | undefined;
           if (runDirectory) {
-            lastRuns.set(selection.folder.uri.toString(), runDirectory);
+            lastRuns.set(selection.folder.uri.toString(), { directory: runDirectory });
             saved = await openReport(selection.folder, runDirectory);
             try {
-              const runs = parseHistory(JSON.parse(await call(selection.folder, historyArgs(selection.folder, ['history', 'runs', '--limit', historyLimit(selection.folder), '--json']))));
+              const { runs, catalog } = await readHistoryRuns(selection.folder, false);
               indexedRuns = runs;
-              history.setRuns(selection.folder.uri.toString(), runs);
+              history.setRuns(selection.folder.uri.toString(), runs, catalog);
             } catch (error) { output.appendLine(`History refresh failed: ${String(error)}`); }
           }
           const problem = messageFor(result, 'Run workflow');
@@ -292,9 +376,8 @@ export function activate(context: vscode.ExtensionContext): void {
     let replay: string[] | undefined;
     for (const metric of metrics) {
       const direction = /(?:throughput|per_second)/.test(metric) ? 'lower-worse' : 'higher-worse';
-      const test = parseHistoryDetection(JSON.parse(await call(folder, historyArgs(folder,
-        ['history', 'detect', baseline.run.id, candidate.run.id, '--metric', metric,
-          '--direction', direction, '--min-percent', String(minimum), '--json']))));
+      const test = await withHost(folder, client => client.historyDetect({ databasePath: historyDb(folder),
+        baselineRunId: baseline.run.id, candidateRunId: candidate.run.id, metric, direction, minimumEffectPercent: minimum }));
       for (const row of test.results.filter(r => r.status === 'regression'
         && r.adjustedPValue !== null && r.adjustedPValue <= test.alpha)) {
         const shared = candidate.measurements.find(m => m.metric === metric
@@ -350,8 +433,7 @@ export function activate(context: vscode.ExtensionContext): void {
       output.appendLine(`Workflow completed; no indexed History row for ${directory}. Open the saved report manually.`);
       return;
     }
-    const candidateDetail = parseHistoryDetail(JSON.parse(await call(folder,
-      historyArgs(folder, ['history', 'show', candidate.id, '--json']))));
+    const candidateDetail = await historyDetail(folder, candidate.id);
     if (!candidateDetail.measurements.length) {
       output.appendLine('Workflow completed without indexed measurements; showing execution report.');
       trackPanel(openHistoryPanel(candidateDetail, activePreset(folder, 'history'), report));
@@ -361,13 +443,11 @@ export function activate(context: vscode.ExtensionContext): void {
       manuallyPinnedBaselines.get(folder.uri.toString())).slice(0, 8);
     for (const baseline of baselines) {
       try {
-        const rows = parseHistoryComparison(JSON.parse(await call(folder,
-          historyArgs(folder, ['history', 'compare', baseline.id, candidate.id, '--json']))));
+        const rows = await compareHistory(folder, baseline.id, candidate.id);
         if (!hasCompatibleMeasurements(rows,
           candidateDetail.measurements.some(measurement => measurement.method === 'dagflow-harness')
             ? 'dagflow-harness' : undefined)) { continue; }
-        const baselineDetail = parseHistoryDetail(JSON.parse(await call(folder,
-          historyArgs(folder, ['history', 'show', baseline.id, '--json']))));
+        const baselineDetail = await historyDetail(folder, baseline.id);
         history.setBaseline(baseline);
         history.setCandidate(candidate);
         history.setComparisons(rows);
@@ -382,19 +462,34 @@ export function activate(context: vscode.ExtensionContext): void {
     trackPanel(openHistoryPanel(candidateDetail, activePreset(folder, 'history'), report));
     output.appendLine('No previous compatible benchmark run found; showing current measurements.');
   };
-  register('cmakeWorkflow.runWorkflow', async () => { await runWorkflow(); });
-  register('cmakeWorkflow.runSelectedNodes', async () => {
+  register('cmakeWorkflow.runWorkflowCli', () => runWorkflow());
+  register('cmakeWorkflow.openPlannedNode', async value => {
+    if (!(value instanceof Item) || !value.state) { return; }
+    const { node, status, error } = value.state;
+    const fields = [['State', status], ['Kind', node.kind], ['Target', node.target], ['Build directory', node.buildDirectory],
+      ['Configuration', node.configuration], ['Dependencies', node.dependencies.join(', ')], ['Resources', node.resources.join(', ')]];
+    infoPanel(`Node: ${node.id}`, `<dl>${fields.filter(([, entry]) => entry).map(([label, entry]) =>
+      `<dt>${escapeHtml(label!)}</dt><dd>${escapeHtml(entry!)}</dd>`).join('')}</dl>`
+      + (node.diagnostics.length || error ? `<h2>Diagnostics</h2><ul>${[...node.diagnostics.map(diagnostic =>
+        `${diagnostic.severity}: ${diagnostic.message}`), ...(error ? [error] : [])].map(message =>
+        `<li>${escapeHtml(message)}</li>`).join('')}</ul>` : ''), 'planned-node');
+  });
+  register('cmakeWorkflow.runNode', async value => {
+    if (value instanceof Item && value.kind === 'node' && value.state) { await runNode(value.state.node.id); }
+  });
+  register('cmakeWorkflow.openLastReport', async () => {
     if (!trusted()) { return; }
     const selection = await choose(); if (!selection) { return; }
-    const full = await plan(selection, undefined, true);
-    const nodes = await vscode.window.showQuickPick(full.nodes.map(node => ({ label: node.id,
-      description: `${node.kind} • ${node.target || '(no target)'}` })),
-    { canPickMany: true, placeHolder: 'Select workflow nodes; the CLI includes their prerequisites' });
-    if (!nodes?.length) { return; }
-    await runWorkflow(nodes.map(node => node.label), selection);
+    const last = lastRuns.get(selection.folder.uri.toString());
+    if (!last) { throw Error('No run recorded in this session for this workspace folder.'); }
+    if (!last.operationId) { await openReport(selection.folder, last.directory, true); return; }
+    const operationId = last.operationId;
+    const saved = await withHost(selection.folder, client => client.supports('operations/report')
+      ? client.operationReport(operationId) : client.getRun(last.directory));
+    infoPanel('Host workflow report', `<p>${escapeHtml(saved.report.status)} • ${escapeHtml(saved.runDirectory)}</p>`
+      + (saved.report.error ? `<p>${escapeHtml(saved.report.error)}</p>` : '')
+      + timelineHtml(saved.report) + reportGraphHtml(saved.report));
   });
-  register('cmakeWorkflow.runNode', async (value: unknown) => { if (value instanceof Item && value.kind === 'node' && value.state) { await runWorkflow([value.state.node.id]); } });
-  register('cmakeWorkflow.openLastReport', async () => { if (!trusted()) { return; } const selection = await choose(); if (!selection) { return; } const directory = lastRuns.get(selection.folder.uri.toString()); if (!directory) { throw Error('No run recorded in this session for this workspace folder.'); } await openReport(selection.folder, directory, true); });
   register('cmakeWorkflow.showHistory', async () => { if (!trusted()) { return; } await refreshHistory(); });
   register('cmakeWorkflow.setHistoryLimit', async () => {
     const folder = await historyContext(); if (!folder) { return; }
@@ -414,31 +509,29 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!trusted()) { return; }
     const folder = await historyContext(); if (!folder) { return; }
     const run = await pickHistoryRun('run for metrics'); if (!run) { return; }
-    const detail = parseHistoryDetail(JSON.parse(await call(folder, historyArgs(folder, ['history', 'show', run.id, '--json']))));
+    const detail = await historyDetail(folder, run.id);
     const metrics = [...new Set(detail.measurements.map(m => m.metric))];
     if (!metrics.length) { void vscode.window.showInformationMessage('This run has no indexed measurements.'); return; }
     const metric = await vscode.window.showQuickPick(metrics, { placeHolder: 'Measurement to inspect' }); if (!metric) { return; }
     const filters = await metricFilters(metric, detail.measurements); if (!filters) { return; }
-    const samples = parseTrendSamples(JSON.parse(await call(folder, historyArgs(folder,
-      ['history', 'metrics', '--run', run.id, '--metric', metric, ...filters, '--json']))));
+    const samples = await withHost(folder, client => client.historyMetrics({
+      databasePath: historyDb(folder), runId: run.id, metric, ...filters,
+    }));
     infoPanel(`Run measurements: ${run.id}`, metricsHtml(samples));
   });
   register('cmakeWorkflow.selectHistoryWorkspace', async () => { const folder = await selectFolder(); if (!folder || !trusted()) { return; } historyFolder = folder; history.setFolder(folder.uri.toString()); await refreshHistory(); });
-  register('cmakeWorkflow.chooseHistoryDb', async () => { if (!trusted()) { return; } const folder = await historyContext(); if (!folder) { return; } const files = await vscode.window.showOpenDialog({ defaultUri: vscode.Uri.file(path.join(folder.uri.fsPath, 'out')), canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { SQLite: ['sqlite', 'db'] }, openLabel: 'Choose History Database' }); const file = files?.[0]; if (!file) { return; } const relative = path.relative(folder.uri.fsPath, file.fsPath); const setting = relative.startsWith('..') || path.isAbsolute(relative) ? file.fsPath : relative; await vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).update('historyDb', setting, vscode.ConfigurationTarget.WorkspaceFolder); manuallyPinnedBaselines.delete(folder.uri.toString()); history.clearSelection(); await refreshHistory(); });
+  register('cmakeWorkflow.chooseHistoryDb', async () => { if (!trusted()) { return; } const folder = await historyContext(); if (!folder) { return; } const files = await vscode.window.showOpenDialog({ defaultUri: vscode.Uri.file(path.join(folder.uri.fsPath, 'out')), canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { SQLite: ['sqlite', 'db'] }, openLabel: 'Choose History Database' }); const file = files?.[0]; if (!file) { return; } const relative = path.relative(folder.uri.fsPath, file.fsPath); const setting = relative.startsWith('..') || path.isAbsolute(relative) ? file.fsPath : relative; await vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).update('historyDb', setting, vscode.ConfigurationTarget.WorkspaceFolder); historyDatabaseOverrides.delete(folder.uri.toString()); manuallyPinnedBaselines.delete(folder.uri.toString()); history.clearSelection(); await refreshHistory(); });
   register('cmakeWorkflow.filterHistory', async () => {
     const folder = await historyContext(); if (!folder || !trusted()) { return; }
     const field = await vscode.window.showQuickPick([
-      { label: 'Status', option: '--status' }, { label: 'Since (ISO timestamp)', option: '--since' },
-      { label: 'Until (ISO timestamp)', option: '--until' }, { label: 'Workflow text', option: '--workflow' },
-      { label: 'Variant', option: '--variant' }, { label: 'Clear filters', option: '' },
-    ], { placeHolder: 'Filter indexed history runs' }); if (!field) { return; }
+      { label: 'Status', option: 'status' }, { label: 'Since (ISO timestamp)', option: 'since' },
+      { label: 'Until (ISO timestamp)', option: 'until' }, { label: 'Workflow text', option: 'workflow' },
+      { label: 'Variant', option: 'variant' }, { label: 'Clear filters', option: '' },
+    ] as const, { placeHolder: 'Filter indexed history runs' }); if (!field) { return; }
     if (!field.option) { historyFilters.delete(folder.uri.toString()); await refreshHistory(); return; }
-    const currentFilters = historyFilters.get(folder.uri.toString()) ?? [];
-    const position = currentFilters.indexOf(field.option);
-    const value = await vscode.window.showInputBox({ prompt: `${field.label}; leave blank to remove this filter`, value: position >= 0 ? currentFilters[position + 1] : '' }); if (value === undefined) { return; }
-    const next = currentFilters.filter((_entry, index) => position < 0 || (index !== position && index !== position + 1));
-    if (value.trim()) { next.push(field.option, value.trim()); }
-    historyFilters.set(folder.uri.toString(), next);
+    const currentFilters = historyFilters.get(folder.uri.toString()) ?? {};
+    const value = await vscode.window.showInputBox({ prompt: `${field.label}; leave blank to remove this filter`, value: currentFilters[field.option] }); if (value === undefined) { return; }
+    historyFilters.set(folder.uri.toString(), { ...currentFilters, [field.option]: value.trim() || undefined });
     await refreshHistory();
   });
   register('cmakeWorkflow.importHistory', async () => {
@@ -446,9 +539,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const folders = await vscode.window.showOpenDialog({ defaultUri: folder.uri, canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Import saved results' });
     const directory = folders?.[0]; if (!directory) { return; }
     const recursive = await vscode.window.showQuickPick([{ label: 'This directory', flag: false }, { label: 'This directory and subdirectories', flag: true }], { placeHolder: 'Import scope' }); if (!recursive) { return; }
-    const args = ['history','import',directory.fsPath,'--json']; if (recursive.flag) { args.push('--recursive'); }
-    const result = JSON.parse(await call(folder, historyArgs(folder, args))) as Record<string, unknown>;
-    if (result.schemaVersion !== 1 || !['imported','unchanged','skipped'].every(key => Number.isSafeInteger(result[key]))) { throw Error('Invalid history import result'); }
+    const result = await withHost(folder, client => client.historyImport(historyDb(folder), directory.fsPath, recursive.flag));
     await refreshHistory();
     void vscode.window.showInformationMessage(`History: ${result.imported} imported, ${result.unchanged} unchanged, ${result.skipped} skipped.`);
   });
@@ -456,19 +547,21 @@ export function activate(context: vscode.ExtensionContext): void {
     const folder = await historyContext(); if (!folder || !trusted()) { return; }
     if (!history.runs().length) { await refreshHistory(); }
     if (!history.runs().length) { void vscode.window.showInformationMessage('No indexed runs in the current history view.'); return; }
-    const metric = await vscode.window.showInputBox({ prompt: 'Exact CLI history metric name', value: 'process_wall_time', validateInput: text => text.trim() ? undefined : 'Enter a metric' }); if (!metric) { return; }
+    const metric = await vscode.window.showInputBox({ prompt: 'Exact History metric name', value: 'process_wall_time', validateInput: text => text.trim() ? undefined : 'Enter a metric' }); if (!metric) { return; }
     const scope = await vscode.window.showQuickPick([
       { label: 'Current History run list', run: undefined as HistoryRun | undefined },
       ...history.runs().map(run => ({ label: `${run.startedAt ?? run.id} • ${run.status}`, description: run.id, run })),
     ], { placeHolder: 'Trend query scope' });
     if (!scope) { return; }
-    const filters: string[] = scope.run ? ['--run', scope.run.id] : [];
-    for (const field of ['variant', 'scenario']) {
+    const filters: { variant?: string; scenario?: string } = {};
+    for (const field of ['variant', 'scenario'] as const) {
       const value = await vscode.window.showInputBox({ prompt: `Optional exact ${field} name; blank includes all`, value: '' });
       if (value === undefined) { return; }
-      if (value) { filters.push(`--${field}`, value); }
+      if (value) { filters[field] = value; }
     }
-    const samples = parseTrendSamples(JSON.parse(await call(folder, historyArgs(folder, ['history','query','--metric',metric.trim(),...filters,'--json']))));
+    const samples = await withHost(folder, client => client.historyQuery({
+      databasePath: historyDb(folder), runId: scope.run?.id, metric: metric.trim(), ...filters,
+    }));
     const trendRuns = scope.run ? [scope.run] : history.runs();
     const recentIds = new Set(trendRuns.map(run => run.id));
     const identities = [...new Set(samples.filter(sample => recentIds.has(sample.runId)).map(trendIdentity))];
@@ -486,22 +579,24 @@ export function activate(context: vscode.ExtensionContext): void {
   register('cmakeWorkflow.inspectBuildTree', async () => {
     const folder = await historyContext(); if (!folder || !trusted()) { return; }
     const picked = await vscode.window.showOpenDialog({ defaultUri: folder.uri, canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Inspect Build Tree' }); const directory = picked?.[0]; if (!directory) { return; }
-    const observed = inspectContext(JSON.parse(await call(folder, ['context','inspect',directory.fsPath,'--json'])));
+    const observed = await withHost(folder, client => client.inspectContext(directory.fsPath));
     infoPanel(`Build tree: ${path.basename(directory.fsPath)}`, contextHtml(observed));
   });
   register('cmakeWorkflow.resolveTarget', async () => {
     const folder = await historyContext(); if (!folder || !trusted()) { return; }
     const picked = await vscode.window.showOpenDialog({ defaultUri: folder.uri, canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Choose Build Tree' }); const directory = picked?.[0]; if (!directory) { return; }
-    const observed = inspectContext(JSON.parse(await call(folder, ['context','inspect',directory.fsPath,'--json'])));
+    const observed = await withHost(folder, client => client.inspectContext(directory.fsPath));
     const executableTargets = observed.targets.filter(target => target.type === 'EXECUTABLE');
     if (!executableTargets.length) { void vscode.window.showInformationMessage('No executable targets were observed in this build tree.'); return; }
     const pickedTarget = await vscode.window.showQuickPick(executableTargets.map(target => ({ label: target.name, description: target.configuration, target })), { placeHolder: 'Resolve an executable target without building' }); if (!pickedTarget) { return; }
-    const args = ['target','resolve','--build-dir',directory.fsPath,'--target',pickedTarget.target.name]; if (pickedTarget.target.configuration) { args.push('--config', pickedTarget.target.configuration); } args.push('--json');
-    infoPanel(`Target: ${pickedTarget.target.name}`, resolvedTargetHtml(JSON.parse(await call(folder, args))));
+    const target = await withHost(folder, client => client.resolveTarget(directory.fsPath,
+      pickedTarget.target.name, pickedTarget.target.configuration || null));
+    infoPanel(`Target: ${pickedTarget.target.name}`, resolvedTargetHtml(target));
   });
   const showProfileDirectory = async (directory: vscode.Uri): Promise<void> => {
     const entries = await vscode.workspace.fs.readDirectory(directory);
-    const names = entries.filter(([name, type]) => type === vscode.FileType.File && (['analysis.json','comparison.json','counter-comparison.json'].includes(name) || name.endsWith('.results.json'))).map(([name]) => name);
+    const names = entries.filter(([name, type]) => type === vscode.FileType.File && isProfileResultFile(name)).map(([name]) => name);
+    if (!names.length) { throw Error('Choose the individual profile run folder containing analysis.json or *.results.json.'); }
     const files: Record<string, unknown> = {};
     for (const name of names) { const uri = vscode.Uri.file(path.join(directory.fsPath, name)); const stat = await vscode.workspace.fs.stat(uri); if (stat.size > 16 * 1024 * 1024) { throw Error(`${name} exceeds the 16 MB viewing limit.`); } files[name] = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8')); }
     const presentation = presentProfileResults(directory.fsPath, files,
@@ -512,14 +607,86 @@ export function activate(context: vscode.ExtensionContext): void {
     const receiver = panel.webview.onDidReceiveMessage(async (message: unknown) => { const request = message as { index?: unknown }; if (!Number.isSafeInteger(request?.index)) { return; } const artifact = presentation.artifacts[request.index as number]; if (!artifact) { return; } try { const uri = vscode.Uri.file(artifact.path); const stat = await vscode.workspace.fs.stat(uri); if (stat.type === vscode.FileType.Directory) { await vscode.commands.executeCommand('revealFileInOS', uri); } else { await vscode.commands.executeCommand('vscode.open', uri); } } catch { void vscode.window.showWarningMessage(`Profile artifact is unavailable: ${artifact.path}`); } });
     panel.onDidDispose(() => receiver.dispose()); trackPanel(panel);
   };
+  const profileWorkspace = () => historyFolder ?? current?.folder ?? vscode.workspace.workspaceFolders?.[0];
+  const profileRoot = (folder: vscode.WorkspaceFolder) => profileOutputRoot(folder.uri.fsPath,
+    vscode.workspace.getConfiguration('cmakeWorkflow', folder.uri).get<string>('resultsDir'));
+  const profilePathsKey = (folder: vscode.WorkspaceFolder, kind: 'runs' | 'roots') =>
+    `profilePaths:${kind}:${folder.uri.toString()}`;
+  const rememberProfilePath = async (folder: vscode.WorkspaceFolder, kind: 'runs' | 'roots', directory: string) => {
+    const key = profilePathsKey(folder, kind);
+    const previous = context.workspaceState.get<string[]>(key, []);
+    await context.workspaceState.update(key, [directory, ...previous.filter(entry => entry !== directory)].slice(0, 30));
+  };
+  const browseProfileDirectory = async (folder: vscode.WorkspaceFolder, openLabel: string) => {
+    const root = vscode.Uri.file(profileRoot(folder));
+    const exists = await vscode.workspace.fs.stat(root).then(
+      info => (info.type & vscode.FileType.Directory) !== 0, () => false);
+    return (await vscode.window.showOpenDialog({
+      defaultUri: exists ? root : folder.uri, canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel,
+    }))?.[0];
+  };
+  const pickSavedProfile = async (folder: vscode.WorkspaceFolder, analyze: boolean): Promise<vscode.Uri | undefined> => {
+    const folders = vscode.workspace.workspaceFolders ?? [folder];
+    const roots = [...new Set(folders.flatMap(workspace => [
+      profileRoot(workspace), path.join(workspace.uri.fsPath, 'out', 'profiles'),
+      path.join(workspace.uri.fsPath, 'out', 'profile-results'),
+      ...context.workspaceState.get<string[]>(profilePathsKey(workspace, 'roots'), []),
+      path.join(workspace.uri.fsPath, 'out'),
+    ]))];
+    const profiles = await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: 'Finding saved profiles' },
+      () => findSavedProfiles(roots, folders.flatMap(workspace =>
+        context.workspaceState.get<string[]>(profilePathsKey(workspace, 'runs'), []))));
+    const items: (vscode.QuickPickItem & { directory?: string })[] = profiles
+      .filter(profile => !analyze || profile.hasCaptures)
+      .map(profile => ({
+        label: path.basename(profile.directory),
+        description: profile.hasAnalysis ? 'Analyzed' : profile.hasCaptures ? 'Captures available' : 'Saved comparison',
+        detail: profile.directory,
+        directory: profile.directory,
+      }));
+    const browseLabel = analyze ? 'Browse for capture folder…' : 'Open Existing Profile…';
+    items.push({ label: browseLabel });
+    const picked = await vscode.window.showQuickPick(items, {
+      title: analyze ? 'Analyze Saved Profile' : 'Saved Profiles',
+      placeHolder: items.length === 1 ? `No matching profiles found. Looked in ${roots.join(', ')}` : 'Choose a profile run',
+      matchOnDetail: true,
+    });
+    if (!picked) { return; }
+    return picked.directory ? vscode.Uri.file(picked.directory) : browseProfileDirectory(folder, browseLabel);
+  };
+  register('cmakeWorkflow.profileAnalyze', async () => {
+    if (!trusted()) { return; }
+    const folder = profileWorkspace(); if (!folder) { reportError('Open a workspace folder first.'); return; }
+    const directory = await pickSavedProfile(folder, true); if (!directory) { return; }
+    const owner = vscode.workspace.getWorkspaceFolder(directory);
+    if (!owner) { throw Error('Open the folder containing this profile as a VS Code workspace to analyze it with Host.'); }
+    const result = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification, title: `Analyzing profile ${path.basename(directory.fsPath)}`, cancellable: true,
+    }, async (_progress, token) => {
+      if (token.isCancellationRequested) { return; }
+      const abort = new AbortController();
+      const cancel = token.onCancellationRequested(() => abort.abort());
+      try {
+        return await withHost(owner, client => client.invoke('profile/analyze', { runDirectory: directory.fsPath }, abort.signal));
+      } catch (error) {
+        if (!abort.signal.aborted) { throw error; }
+      } finally { cancel.dispose(); }
+    });
+    if (result) {
+      await rememberProfilePath(owner, 'runs', result.runDirectory);
+      await showProfileDirectory(vscode.Uri.file(result.runDirectory));
+    }
+  });
   registerProfileCommands({ register, trusted, folder: historyContext, pair: comparisonPair,
-    call, historyArgs, database: folder => noHistory(folder) ? undefined : historyDb(folder),
-    execute: async (folder, args, knownDirectory) => {
+    call, historyDetail, database: folder => noHistory(folder) ? undefined : historyDb(folder),
+    execute: async (folder, args) => {
       if (!trusted()) { return; }
+      const resultsArg = args.indexOf('--results-dir');
+      if (resultsArg >= 0) { await rememberProfilePath(folder, 'roots', args[resultsArg + 1]); }
       const client = clientFor(folder);
       activeClients.add(client);
       try {
-        if (noHistory(folder) && args[1] !== 'analyze') {
+        if (noHistory(folder)) {
           const boundary = args.indexOf('--');
           args.splice(boundary < 0 ? args.length : boundary, 0, '--no-history');
         }
@@ -527,8 +694,9 @@ export function activate(context: vscode.ExtensionContext): void {
         output.show(true);
         const directory = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
           title: `CMakeWorkflow: ${args.slice(0, 2).join(' ')}`, cancellable: true },
-        async (_progress, token) => executeProfile(client, args, token, text => output.append(text), knownDirectory));
+        async (_progress, token) => executeProfile(client, args, token, text => output.append(text)));
         if (directory) {
+          await rememberProfilePath(folder, 'runs', directory);
           await showProfileDirectory(vscode.Uri.file(directory));
           // Only refresh the currently displayed workspace's history.
           if (historyFolder?.uri.toString() === folder.uri.toString()) {
@@ -539,9 +707,16 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
   register('cmakeWorkflow.openProfileResults', async () => {
-    const folder = await historyContext(); if (!folder) { return; }
-    const picked = await vscode.window.showOpenDialog({ defaultUri: folder.uri, canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Open Saved Profile Results' }); const directory = picked?.[0]; if (!directory) { return; }
+    const folder = profileWorkspace(); if (!folder) { reportError('Open a workspace folder first.'); return; }
+    const directory = await pickSavedProfile(folder, false); if (!directory) { return; }
     await showProfileDirectory(directory);
+    await rememberProfilePath(vscode.workspace.getWorkspaceFolder(directory) ?? folder, 'runs', directory.fsPath);
+  });
+  register('cmakeWorkflow.openExistingProfile', async () => {
+    const folder = profileWorkspace(); if (!folder) { reportError('Open a workspace folder first.'); return; }
+    const directory = await browseProfileDirectory(folder, 'Open Existing Profile'); if (!directory) { return; }
+    await showProfileDirectory(directory);
+    await rememberProfilePath(vscode.workspace.getWorkspaceFolder(directory) ?? folder, 'runs', directory.fsPath);
   });
   register('cmakeWorkflow.selectChartPreset', async () => { const folder = await historyContext(); if (!folder) { return; } const source = await vscode.window.showQuickPick([{ label: 'CLI history', value: 'history' as const }, { label: 'DagFlow harness', value: 'dagflow' as const }], { placeHolder: 'Select chart source' }); if (source) { await choosePreset(folder, source.value); } });
   register('cmakeWorkflow.createChartPreset', async () => {
@@ -575,32 +750,34 @@ export function activate(context: vscode.ExtensionContext): void {
   register('cmakeWorkflow.pickCandidate', async () => { const run = await pickHistoryRun('Candidate', history.baselineId()); if (run) { history.setCandidate(run); } });
   register('cmakeWorkflow.setBaseline', async (value: unknown) => { const run = historyRunFromCommand(value); if (run) { history.setBaseline(run); const folder = await historyContext(); if (folder) { manuallyPinnedBaselines.set(folder.uri.toString(), run.id); } } });
   register('cmakeWorkflow.setCandidate', async (value: unknown) => { const run = historyRunFromCommand(value); if (run) { history.setCandidate(run); } });
-  register('cmakeWorkflow.compareHistory', async () => { const pair = await comparisonPair(); if (!pair) { return; } const [folder, baseline, candidate] = pair; const rows = parseHistoryComparison(JSON.parse(await call(folder, historyArgs(folder, ['history','compare',baseline,candidate,'--json'])))); history.setComparisons(rows);
+  register('cmakeWorkflow.compareHistory', async () => { const pair = await comparisonPair(); if (!pair) { return; } const [folder, baseline, candidate] = pair; const rows = await compareHistory(folder, baseline, candidate); history.setComparisons(rows);
     const [baselineDetail, candidateDetail] = await Promise.all([
-      call(folder, historyArgs(folder, ['history','show',baseline,'--json'])).then(text => parseHistoryDetail(JSON.parse(text))),
-      call(folder, historyArgs(folder, ['history','show',candidate,'--json'])).then(text => parseHistoryDetail(JSON.parse(text))),
+      historyDetail(folder, baseline),
+      historyDetail(folder, candidate),
     ]);
     trackPanel(openComparisonPanel(baselineDetail, candidateDetail, rows, activePreset(folder, 'history'),
           await loadComparisonEvidence(baselineDetail, candidateDetail)));
     if (rows.length === 1 && rows[0].metric === '*') { void vscode.window.showWarningMessage(`${rows[0].reason ?? 'No indexed measurements to compare.'} Baseline: ${baselineDetail.measurements.length} samples; candidate: ${candidateDetail.measurements.length}. Choose two measured runs, or use Compare DagFlow Harness Results for invoke campaigns.`); }
   });
   register('cmakeWorkflow.detectRegression', async () => { const pair = await comparisonPair(); if (!pair) { return; } const [folder, baseline, candidate] = pair;
-    let rows = history.comparisons(); if (!rows) { rows = parseHistoryComparison(JSON.parse(await call(folder, historyArgs(folder, ['history','compare',baseline,candidate,'--json'])))); history.setComparisons(rows); }
+    let rows = history.comparisons(); if (!rows) { rows = await compareHistory(folder, baseline, candidate); history.setComparisons(rows); }
     const metrics = [...new Set(rows.map(row => row.metric).filter(metric => metric !== '*'))];
     if (!metrics.length) { void vscode.window.showInformationMessage('These runs have no indexed measurements for a statistical test.'); return; }
     const metric = await vscode.window.showQuickPick(metrics, { placeHolder: 'Metric to test' }); if (!metric) { return; }
     const direction = await vscode.window.showQuickPick([
-      { label: 'Higher is worse', value: 'higher-worse' },
-      { label: 'Lower is worse', value: 'lower-worse' },
+      { label: 'Higher is worse', value: 'higher-worse' as const },
+      { label: 'Lower is worse', value: 'lower-worse' as const },
     ], { placeHolder: 'Declare the regression direction' }); if (!direction) { return; }
     const minimum = await vscode.window.showInputBox({ prompt: 'Minimum practical effect, percent', value: '5', validateInput: text => { const number = Number(text); return Number.isFinite(number) && number > 0 ? undefined : 'Enter a positive number'; } }); if (minimum === undefined) { return; }
     const filters = await metricFilters(metric, rows); if (!filters) { return; }
-    const alpha = await vscode.window.showInputBox({ prompt: 'Significance level alpha (CLI default 0.05)', value: '0.05',
+    const alpha = await vscode.window.showInputBox({ prompt: 'Significance level alpha (default 0.05)', value: '0.05',
       validateInput: text => Number.isFinite(Number(text)) && Number(text) > 0 && Number(text) < 1 ? undefined : 'Enter a number strictly between 0 and 1.' });
     if (alpha === undefined) { return; }
-    const report = parseHistoryDetection(JSON.parse(await call(folder, historyArgs(folder, ['history','detect',baseline,candidate,'--metric',metric,'--direction',direction.value,'--min-percent',minimum,'--alpha',String(Number(alpha)),...filters,'--json']))));
+    const report = await withHost(folder, client => client.historyDetect({ databasePath: historyDb(folder),
+      baselineRunId: baseline, candidateRunId: candidate, metric, direction: direction.value,
+      minimumEffectPercent: Number(minimum), alpha: Number(alpha), ...filters }));
     history.setDetection(report);
-    if (report.results.every(row => row.pValue === null)) { void vscode.window.showInformationMessage('No statistical verdict: expand the test results for CLI diagnostics.'); }
+    if (report.results.every(row => row.pValue === null)) { void vscode.window.showInformationMessage('No statistical verdict: expand the test results for Host diagnostics.'); }
   });
   context.subscriptions.push({ dispose: () => { for (const client of activeClients) { client.dispose(); } activeClients.clear(); } });
 }

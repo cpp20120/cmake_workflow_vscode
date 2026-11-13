@@ -1,3 +1,4 @@
+import type { OperationNode } from './operationDetails';
 import type { RecoveryInspection } from './durableProtocol';
 import type { Event } from './protocol';
 
@@ -12,6 +13,7 @@ export interface TrackedOperation {
 export interface OperationObservation {
   inspection?: RecoveryInspection;
   events: Event[];
+  liveNodes?: ReadonlyMap<string, OperationNode>;
   nextSequence: number;
   hasMore: boolean;
   error?: string;
@@ -48,7 +50,20 @@ export function extendObservation(previous: OperationObservation | undefined, in
     cursor = event.sequence;
   }
   if (cursor !== nextSequence) { throw Error('Unmatched operation event cursor'); }
-  return { ...previous, events: [...(previous?.events ?? []), ...incoming].slice(-100),
+  const liveNodes = new Map(previous?.liveNodes);
+  for (const event of incoming) {
+    if (!event.nodeId || !event.status) { continue; }
+    const before = liveNodes.get(event.nodeId);
+    liveNodes.set(event.nodeId, {
+      id: event.nodeId, kind: event.nodeKind ?? before?.kind ?? 'node', status: event.status,
+      dependencies: [], startedAt: event.type === 'node_started' ? event.timestamp : before?.startedAt ?? null,
+      finishedAt: event.type === 'node_finished' ? event.timestamp : null,
+      error: event.error, exitCode: event.exitCode,
+      stdout: event.artifacts.find(item => item.type === 'stdout')?.path ?? before?.stdout ?? null,
+      stderr: event.artifacts.find(item => item.type === 'stderr')?.path ?? before?.stderr ?? null,
+    });
+  }
+  return { ...previous, liveNodes, events: [...(previous?.events ?? []), ...incoming].slice(-100),
     nextSequence, hasMore, refreshedAt: new Date().toISOString() };
 }
 export function observationLabel(value: OperationObservation | undefined): string {

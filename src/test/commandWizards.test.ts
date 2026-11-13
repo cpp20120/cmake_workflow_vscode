@@ -59,7 +59,7 @@ const named = (items: Item[], text: string) => items.find(item => label(item) ==
 
 test('execution wizards never call the CLI in an untrusted workspace', async () => {
   const h = harness(); registerNativeCommands(h.services); registerCampaignCommands(h.services);
-  registerProfileCommands({ ...h.services, pair: async () => undefined, database: () => undefined, historyArgs: (_f, a) => a,
+  registerProfileCommands({ ...h.services, pair: async () => undefined, database: () => undefined, historyDetail: async () => { throw Error("Unexpected history request"); },
     execute: async (_f, args) => { h.executions.push(args); } });
   h.untrust();
   for (const [name, action] of h.commands) {
@@ -71,7 +71,7 @@ test('execution wizards never call the CLI in an untrusted workspace', async () 
 test('multiple-profile wizard passes ordered variants and one common target to CLI', async () => {
   const h = harness();
   registerProfileCommands({ ...h.services, pair: async () => undefined, database: () => '/catalog with spaces',
-    historyArgs: (_f, a) => a, execute: async (_f, a) => { h.executions.push(a); } });
+    historyDetail: async () => { throw Error("Unexpected history request"); }, execute: async (_f, a) => { h.executions.push(a); } });
   const first = path.resolve('build o3'), second = path.resolve('build lto'); directories = [first, second];
   let variant = 0, additions = 0;
   select = (items, options) => {
@@ -91,7 +91,7 @@ test('multiple-profile wizard passes ordered variants and one common target to C
 test('canceling a profile wizard before capture never launches it', async () => {
   const h = harness();
   registerProfileCommands({ ...h.services, pair: async () => undefined, database: () => undefined,
-    historyArgs: (_f, a) => a, execute: async (_f, a) => { h.executions.push(a); } });
+    historyDetail: async () => { throw Error("Unexpected history request"); }, execute: async (_f, a) => { h.executions.push(a); } });
   directories = ['/build']; select = () => undefined;
   await h.commands.get('cmakeWorkflow.profileRun')!();
   assert.deepEqual(h.executions, []);
@@ -150,7 +150,7 @@ test('History filters narrow scenario choices to the selected variant', async ()
   assert.deepEqual(await metricFilters('latency', [
     { metric: 'latency', variant: 'o3', scenario: 'chain-8' },
     { metric: 'latency', variant: 'lto', scenario: 'chain-4' },
-  ]), ['--variant', 'lto', '--scenario', 'chain-4']);
+  ]), { variant: 'lto', scenario: 'chain-4' });
 });
 
 test('sequence forwards both argv lists and restricts the second target to the same configuration', async () => {
@@ -173,7 +173,7 @@ test('coverage corpus merge is an explicit option and keeps destination as one p
 
 test('new wizard commands are contributed and reachable from view menus', () => {
   const h = harness(); registerNativeCommands(h.services); registerCampaignCommands(h.services);
-  registerProfileCommands({ ...h.services, pair: async () => undefined, database: () => undefined, historyArgs: (_f, a) => a,
+  registerProfileCommands({ ...h.services, pair: async () => undefined, database: () => undefined, historyDetail: async () => { throw Error("Unexpected history request"); },
     execute: async () => {} });
   const manifest = JSON.parse(readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
   const contributed = new Set(manifest.contributes.commands.map((c: { command: string }) => c.command));

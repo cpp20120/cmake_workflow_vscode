@@ -4,11 +4,11 @@ Run `npm install`, open this folder in VS Code, then press **F5** and select **R
 
 Set `cmakeWorkflow.executable` to a native binary path, or leave it as `CMakeWorkflow` when available on PATH. For a development build, set the executable to `dotnet` and `cmakeWorkflow.prefixArgs` to an array containing the absolute path to `CMakeWorkflow.dll`.
 
-By default, history uses the CLI's default database. Set `cmakeWorkflow.historyDb` to an absolute path or a path relative to the workspace folder to use another catalog for both new workflow runs and history queries. The History toolbar also has **Choose History Database**.
+History uses the Host workspace database at `.cmakeworkflow/history.sqlite` by default. Set `cmakeWorkflow.historyDb` to a database within the workspace or use **Choose History Database**. **Open Operation History** switches the current session to the database reported by an indexed operation.
 
 Open the **CMakeWorkflow** icon in the Activity Bar. Its toolbar has buttons to select a workflow, plan, run, open the last report, browse history, and choose the CLI executable. Expand a node to see its target, build tree, dependencies, diagnostics, and available artifacts; click an artifact to open it. Optional `cmakeWorkflow.jobs` and `cmakeWorkflow.resultsDir` settings map to `--jobs` and `--results-dir`.
 
-**Open Last Report** opens the saved `run.json` from the latest run in this VS Code session. In **History & Comparison**, refresh the indexed runs and click a run to inspect its nodes, artifacts and sample charts. Choose Baseline and Candidate (or use the buttons beside a run), then choose **Compare Runs**. This opens a comparison table and raw sample plot; the CLI supplies status and medians. **Detect Regression** asks for a metric, worse direction and minimum percentage effect, then displays the CLI's statistical result and adjusted p-value. The CLI needs at least 10 individual samples per run for a verdict; missing or incompatible measurements appear as diagnostics. Workflow `invoke` campaigns may be indexed as runs without indexed measurements. The extension does not configure or schedule builds itself. Workspace trust is required for every CLI command.
+**Open Last Report** displays the latest inspected Host workflow report or opens the saved `run.json` for a CLI run in this VS Code session. In **History & Comparison**, refresh the indexed runs and click a run to inspect its nodes, artifacts and sample charts. Choose Baseline and Candidate (or use the buttons beside a run), then choose **Compare Runs**. This opens a comparison table and raw sample plot; the Host supplies status and medians. **Detect Regression** asks for a metric, worse direction and minimum percentage effect, then displays the Host's statistical result and adjusted p-value. The detector needs at least 10 individual samples per run for a verdict; missing or incompatible measurements appear as diagnostics. Workflow `invoke` campaigns may be indexed as runs without indexed measurements. The extension does not configure or schedule builds itself. Workspace trust is required for every CLI command.
 
 ## Chart presets and DagFlow harness results
 
@@ -18,14 +18,19 @@ For DagFlow's `invoke` campaigns, choose **Compare DagFlow Harness Results** in 
 
 ## More CLI tools in the UI
 
-- Expand a planned workflow and use the play button beside a node to run that node and its dependency closure. The extension first calls `workflow plan FILE --only NODE --json`, shows the resulting nodes, then asks you to confirm before `workflow run FILE --only NODE --json`.
-- In **History & Comparison**, use **Filter History** for status, start/end time, workflow text, or variant. **Import Saved Results** calls `history import` on a selected directory, optionally recursively. Run details now show recorded host and build environments alongside charts and artifacts.
-- In the Workflow toolbar, **Check Tools** lists CLI profiles and runs the read-only `tooling doctor --profile NAME --json`. **Inspect Build Tree** displays the CLI's observed state, diagnostics and File API targets. **Resolve Executable Target** asks the CLI for the executable path without building.
+- Expand a planned workflow and use the play button beside a node to review its dependency closure and submit it to the Host.
+- In **History & Comparison**, use **Filter History** for status, start/end time, workflow text, or variant. **Import Saved Results** calls `history/import` on a selected directory, optionally recursively. Run details now show recorded host and build environments alongside charts and artifacts.
+- In the Workflow toolbar, **Check Tools** lists CLI profiles and runs the read-only `tooling doctor --profile NAME --json`. **Inspect Build Tree** displays the Host's observed state, diagnostics and File API targets. **Resolve Executable Target** asks the Host for the executable path without building.
 - In the History toolbar, **Open Profile Results** opens a saved profile directory. It displays timing comparisons, counters, capture details and available trace/report links from existing `comparison.json`, `counter-comparison.json`, `analysis.json` and `*.results.json` files. Opening the view does not rerun profiling or analysis.
 
 ## Manual profiling
 
-The command palette and the **…** menus of both Workflow and History provide:
+Open **… → Profiles** in either **Workflow** or **History & Comparison**.
+**Saved Profiles** lists discovered run folders, newest first. It checks the
+configured `cmakeWorkflow.resultsDir`, standard folders under `out` and
+output locations previously used by the extension. **Open Existing Profile…**
+opens a saved run folder by path. Select the individual folder containing
+`analysis.json` or `*.results.json`.
 
 - **CMakeWorkflow: Run Profile** — choose a configured build tree, an executable
   target/configuration observed by CMake File API, capture mode, timing repeats,
@@ -50,13 +55,13 @@ The command palette and the **…** menus of both Workflow and History provide:
   Replay requires the CLI implementation of `profile replay`, currently in the
   local CLI patches. Older executables reject that command. Missing snapshots
   or changed binaries are reported through the CLI diagnostics.
-- **CMakeWorkflow: Analyze Saved Profile** — select a directory containing saved
-  captures. Calls `profile analyze` to regenerate analysis files and opens the
-  result. It does not rerun the benchmark. The existing **Open Profile Results**
-  command only reads saved results.
+- **CMakeWorkflow: Analyze Saved Profile** — select a run with saved captures
+  from the list, or browse to its folder. The Host regenerates analysis files
+  and opens the result from the saved captures. The run folder must be inside
+  an open workspace folder.
 
-These commands require workspace trust and use the selected workspace's CLI
-and environment. Run and Replay honor its `historyDb`; the results-directory
+Run and Replay require workspace trust and use the selected workspace's CLI
+and environment. They honor its `historyDb`; the results-directory
 prompt defaults to `resultsDir` or `out/profiles`. Backend choices refer to the
 workspace host, including Remote SSH/WSL/containers. Required profiler tools and
 permissions must already be available; profiling does not install them implicitly.
@@ -106,30 +111,29 @@ CLI. No campaign or installation starts automatically.
 
 ## Workflow selection and History controls
 
-- **Run Selected Nodes and Dependencies** selects several nodes, plans with
-  repeated `--only NODE`, and displays the CLI dependency closure before launch.
+- **Run Selected Nodes and Dependencies** shows the dependency closure returned
+  by Host preflight before submitting the selected nodes.
 - **Set History Run Limit** changes workspace setting `cmakeWorkflow.historyLimit`
   (default 50). It also controls the pool used for automatic baseline selection.
 - **Toggle History Recording** changes `cmakeWorkflow.noHistory` (default false).
-  New workflow and manual profile runs then pass `--no-history` instead of
-  `--history-db`. Saved reports remain available, and existing History can still
-  be browsed. Automatic result comparison is skipped for unindexed workflow runs.
-- **Inspect Run Measurements** calls `history metrics` with selected run, metric,
-  variant and scenario, and displays the CLI's raw measurements. Large tables
+  **Disabled** is offered first in the Host launch picker. Standalone workflow
+  and profile commands use `--no-history` when recording is disabled.
+- **Inspect Run Measurements** calls `history/metrics` with selected run, metric,
+  variant and scenario, and displays the Host's raw measurements. Large tables
   explicitly show at most 1000 rows; narrow the filters to inspect the rest.
 - **Detect Regression** now exposes variant/scenario filters and significance
-  level `alpha`. Statistical decisions remain in the CLI.
+  level `alpha`. The Host computes the statistical result.
 - **Show History Trend** allows selecting one run or the current History list,
   with server-side variant/scenario filters. The current-list view displays only
-  loaded runs; the CLI query may return additional runs. The 32 MB response cap
-  still applies, so narrow the query or choose one run for large catalogs.
+  loaded runs. The Host limits measurement queries to 50,000 rows, so narrow the
+  query or choose one run for large catalogs.
 
 ## Visualizations
 
-- **Show Workflow Graph** in the Workflow toolbar calls `workflow plan --json` and draws the CLI's dependency edges and node diagnostics. An invalid plan is still shown, so its errors can be inspected.
-- Open an indexed workflow run in History to see an execution timeline, dependency graph and failed/blocked/canceled nodes. The extension loads the authoritative saved `workflow report RUN_DIRECTORY --json`; the failure section links to indexed stdout and stderr logs. If the report is unavailable, indexed run details remain visible.
-- **Show History Trend** asks for an exact metric name, calls `history query --metric NAME --json` and plots raw samples from the current History run list in time order. It separates units, variants, scenarios and methods; it does not calculate a trend statistic or regression verdict. Large CLI JSON responses are rejected at 32 MB, with a request to narrow the query.
-- The CLI comparison view highlights differing recorded host and build-environment fields beside the CLI's comparison status. Highlighting describes a difference; it does not override the CLI's comparability decision.
+- **Show Workflow Graph** in the Workflow toolbar draws the Host's dependency edges and node diagnostics. An invalid plan is still shown, so its errors can be inspected.
+- Open an indexed workflow run in History to see an execution timeline, dependency graph and failed/blocked/canceled nodes. The extension loads the saved report through `runs/get`; the failure section links to indexed stdout and stderr logs. If the report is unavailable, indexed run details remain visible.
+- **Show History Trend** asks for an exact metric name, calls `history/query` and plots raw samples from the current History run list in time order. It separates units, variants, scenarios and methods; it does not calculate a trend statistic or regression verdict.
+- The History comparison view highlights differing recorded host and build-environment fields beside the Host's comparison status. Highlighting describes a difference; it does not override the Host's comparability decision.
 - The DagFlow harness comparison has a case-by-metric matrix colored by the direction and size of the difference between saved medians. Clicking a cell jumps to its raw sample chart. The matrix explicitly reports when the selected results have no common case/metric pairs. Color never implies a statistical verdict or that a larger value is better.
 
 ## Performance distributions and cancellation
@@ -167,6 +171,77 @@ Profiler permissions depend on the workspace host: successful `perf stat`
 captures do not imply that `perf record` or scheduler tracing is permitted.
 If a capture fails, inspect **CMakeWorkflow** output for the original error;
 a subsequent History import does not make that capture successful.
+
+## Host API
+
+Open **CMakeWorkflow → Host Operations** in the Activity Bar and click the
+**Open Host API** toolbar button. The editor tab groups the connected Host's
+methods and shows their parameters as fields, checkboxes, dropdowns, and
+repeatable items. The response appears below the form. Keep the same tab open
+between `tooling/planFix` and `tooling/applyFix`. Workflow operations submitted
+through the API appear in Operations after refresh.
+
+Expand an operation to see its History status. Failed or pending indexing
+offers an inline retry. Click an indexed History row to open its database.
+
+The catalog is generated from `IHostRpc` and the source-generated `HostJson`
+metadata of a managed .NET runner build. To regenerate it, run:
+
+```sh
+dotnet build /path/to/runner/CMakeWorkflow.csproj -c Release
+dotnet build scripts/host-contract/host-contract.csproj -c Release -p:RunnerOutput=/path/to/runner/bin/Release/net10.0
+dotnet scripts/host-contract/bin/Release/net10.0/host-contract.dll /tmp/cmakeworkflow-host-schema.json
+node scripts/host-contract/generate.mjs /tmp/cmakeworkflow-host-schema.json
+```
+
+Add `--check` to the last command to verify the checked-in TypeScript catalog.
+
+## Durable workflow operations via Host
+
+**Run Workflow via Host (Durable)** plans the entire selected workflow through the local
+Host and accepts it with an idempotency key before running it. Use **Inspect Last
+Host Operation** to reconnect, review the durable acceptance state, read saved
+progress events, and open a terminal report; **Request Host Operation Cancellation**
+asks for explicit confirmation and records a cancellation intent. A cancellation
+request is not proof that subprocesses have stopped. Workspace trust is required.
+
+Click an operation for its summary, then expand it to see node states.
+Click a node for dependencies, timing, exit status and diagnostics. Finalized
+nodes offer **Download Host Artifact** in their context menu. **Open Raw Events**
+in the operation context menu opens a separate tab for debugging.
+
+If **History & Comparison** shows zero runs, expand **Runs (0)** to see
+whether the database is missing, filters exclude the results, or the latest
+observed operation has a known indexing status. The database row displays the
+active catalog and opens its chooser.
+
+**Refresh Host Operations** lists operations from the Host, including runs
+submitted by other clients. Use **Load more operations** to page through the
+list. **Recover Host Operation** offers the next recovery action for the
+observed revision and asks for confirmation that prior processes have stopped.
+**Download Host Artifact** saves a finalized file after checking its SHA-256
+against the Host catalog.
+
+The Host's `workflow/start` contract requires a unique run directory inside the
+workspace. The extension creates one below `cmakeWorkflow.resultsDir` or
+`out/results`, and stores a pending request ID *before* sending RPC. A missing
+RPC response may mean acceptance succeeded; use Inspect to look up that request
+before starting another workflow. No automatic retry or resume is performed.
+
+**Run Workflow**, **Run Selected Nodes and Dependencies**, and **Run Node and Dependencies**
+use the Host. On a Host that advertises `workflow/historyPolicy`, choose **Default**,
+**Disabled**, or **Explicit Database** before admission. The workspace settings
+`noHistory` and `historyDb` determine the first choice offered. The Operations
+view shows History indexing separately from workflow state. **Retry History
+Indexing** invokes `history/retryIndex` for the selected operation. History
+listing, filters, import, metrics, trends, comparison, and regression detection
+use Host RPC. **Run Workflow with Standalone CLI** retains the legacy workflow
+execution command. Closing VS Code
+or **Stop Durable Host** interrupts an extension-owned Host and may leave an
+operation needing manual reconciliation. For long unattended runs, configure an
+externally managed Host using `cmakeWorkflow.hostEndpoint`. Existing Host Doctor
+and Fix retain their own Host lifecycle; the two extension-owned Hosts are not
+shared in this initial integration.
 
 ## Local Host Doctor and Fix
 

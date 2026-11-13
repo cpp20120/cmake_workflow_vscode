@@ -1,3 +1,5 @@
+import type { HistoryIndexStatus } from './historyProtocol';
+import { historyEmptyState } from './historyEmptyState';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import type { HistoryDetection, HistoryDetectionReport, HistoryDifference, HistoryRun } from './protocol';
@@ -13,6 +15,8 @@ export class HistoryItem extends vscode.TreeItem {
 }
 interface State {
   runs: HistoryRun[];
+  catalog?: { database: string; missing: boolean; filtered: boolean };
+  indexing?: HistoryIndexStatus;
   baseline?: HistoryRun;
   candidate?: HistoryRun;
   comparisons?: HistoryDifference[];
@@ -27,7 +31,21 @@ export class HistoryView implements vscode.TreeDataProvider<HistoryItem>, vscode
   private folderKey?: string;
   setFolder(key: string): void { this.folderKey = key; this.state(); this.changed.fire(undefined); }
   private state(): State | undefined { if (!this.folderKey) { return; } let state = this.states.get(this.folderKey); if (!state) { state = { runs: [] }; this.states.set(this.folderKey, state); } return state; }
-  setRuns(key: string, runs: HistoryRun[]): void { const state = this.states.get(key) ?? { runs: [] }; state.runs = runs; state.comparisons = undefined; state.detection = undefined; this.states.set(key, state); if (key === this.folderKey) { this.changed.fire(undefined); } }
+  setRuns(key: string, runs: HistoryRun[], catalog?: State['catalog']): void {
+    const state = this.states.get(key) ?? { runs: [] };
+    state.runs = runs;
+    state.catalog = catalog ?? state.catalog;
+    state.comparisons = undefined;
+    state.detection = undefined;
+    this.states.set(key, state);
+    if (key === this.folderKey) { this.changed.fire(undefined); }
+  }
+  setIndexStatus(key: string, status: HistoryIndexStatus): void {
+    const state = this.states.get(key) ?? { runs: [] };
+    state.indexing = status;
+    this.states.set(key, state);
+    if (key === this.folderKey) { this.changed.fire(undefined); }
+  }
   runs(): HistoryRun[] { return this.state()?.runs ?? []; }
   clearSelection(): void { const state = this.state(); if (state) { state.baseline = undefined; state.candidate = undefined; state.comparisons = undefined; state.detection = undefined; this.changed.fire(undefined); } }
   setBaseline(run: HistoryRun): void { const state = this.state(); if (!state) { return; } state.baseline = run; state.comparisons = undefined; state.detection = undefined; this.changed.fire(undefined); }
@@ -52,10 +70,28 @@ export class HistoryView implements vscode.TreeDataProvider<HistoryItem>, vscode
         return item;
       };
       const rows = [slot('Baseline', baseline, 'cmakeWorkflow.pickBaseline'), slot('Candidate', candidate, 'cmakeWorkflow.pickCandidate')];
+      if (state.catalog) {
+        const database = new HistoryItem(`Database: ${path.basename(state.catalog.database)}`, 'detail');
+        database.tooltip = state.catalog.database;
+        database.iconPath = new vscode.ThemeIcon('database');
+        database.command = { command: 'cmakeWorkflow.chooseHistoryDb', title: 'Choose History Database' };
+        rows.unshift(database);
+      }
       const runs = new HistoryItem(`Runs (${state.runs.length})`, 'runs'); runs.iconPath = new vscode.ThemeIcon('history'); rows.push(runs);
       if (state.comparisons) { const comparisons = new HistoryItem(`Comparison (${state.comparisons.length})`, 'comparisons'); comparisons.iconPath = new vscode.ThemeIcon('diff'); rows.push(comparisons); }
       if (state.detection) { const detections = new HistoryItem(`Statistical test (${state.detection.results.length})`, 'detections'); detections.description = `${state.detection.metric} • ${state.detection.direction} • ≥${state.detection.minimumEffectPercent}%`; detections.tooltip = `${state.detection.test}; alpha=${state.detection.alpha}`; detections.iconPath = new vscode.ThemeIcon('beaker'); rows.push(detections); }
       return rows;
+    }
+    if (item.kind === 'runs' && !state.runs.length) {
+      const hint = state.catalog
+        ? historyEmptyState(state.catalog.database, state.catalog.missing, state.catalog.filtered, state.indexing)
+        : { message: 'Refresh History to load runs from the workspace database.', action: 'cmakeWorkflow.showHistory', operationId: undefined };
+      const row = new HistoryItem(hint.message, 'detail');
+      row.tooltip = hint.message;
+      row.iconPath = new vscode.ThemeIcon('info');
+      row.command = { command: hint.action, title: hint.message,
+        arguments: hint.operationId ? [{ folderKey: this.folderKey, operationId: hint.operationId }] : [] };
+      return [row];
     }
     if (item.kind === 'runs') { return state.runs.map(run => { const child = new HistoryItem(`${run.status} • ${path.basename(run.workflow ?? run.directory)}`, 'run', run); child.description = run.startedAt ?? run.id.slice(0, 12); child.tooltip = `${run.id}\n${run.directory}${run.sourceAvailable ? '' : '\nSource missing'}`; child.iconPath = new vscode.ThemeIcon(run.status === 'succeeded' ? 'pass-filled' : run.status === 'failed' ? 'error' : 'circle-outline'); child.contextValue = 'cmakeWorkflowHistoryRun'; child.command = { command: 'cmakeWorkflow.historyDetails', title: 'Run Details', arguments: [run] }; return child; }); }
     if (item.kind === 'comparisons') { return (state.comparisons ?? []).map(row => this.resultItem(row, 'difference')); }

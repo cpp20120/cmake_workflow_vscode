@@ -1,3 +1,5 @@
+import { hostRequestSchemas } from '../hostContract.generated';
+import { hostRequestExample, parseHostRequest } from '../hostRequestForm';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as net from 'node:net';
@@ -11,6 +13,7 @@ import { HostClient } from '../hostClient';
 import { HostProcess } from '../hostProcess';
 import { parseHostInfo, parseToolingPlan, parseDoctorProgress, parseFixPlan, parseFixResult } from '../hostProtocol';
 import { parseReportSnapshot, parseTargetResolution, parseMeasurementRows } from '../applicationProtocol';
+import { downloadOperationArtifact } from '../operationArtifacts';
 
 const tool = { id: 'cmake', displayName: 'CMake', installed: true, command: '/tools with spaces/cmake', version: '4.0.0', minimumVersion: '3.26', diagnostic: null };
 const plan = { schemaVersion: 1, ready: true, tools: [tool], steps: [], platform: 'Linux', packageManager: 'None', installDirectory: '/tools with spaces', profiles: ['cmake'] };
@@ -105,7 +108,7 @@ test('owned Host reports missing executable and cleans up startup', async () => 
 });
 
 const binary = process.env.CMAKEWORKFLOW_HOST_TEST_BINARY;
-test('real NativeAOT Host: TypeScript and CLI, simultaneous workspaces, reconnect, cleanup', { skip: !binary, timeout: 60000 }, async () => {
+test('real Host: TypeScript and CLI, simultaneous workspaces, reconnect, cleanup', { skip: !binary, timeout: 60000 }, async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'cmwf-workspace '));
   const second = path.join(workspace, 'second workspace'); await mkdir(second);
   let log = '';
@@ -126,11 +129,83 @@ test('real NativeAOT Host: TypeScript and CLI, simultaneous workspaces, reconnec
       assert.equal(two.info.workspaceDirectory, second);
       const manifest = path.join(workspace, 'inspect.json');
       await writeFile(manifest, JSON.stringify({ schemaVersion: 2, contexts: { worker: { buildDirectory: 'not built', mode: 'observe' } },
-        nodes: [{ id: 'inspect', kind: 'inspect', context: 'worker' }] }));
+        nodes: [{ id: 'inspect', kind: 'inspect', context: 'worker' },
+          { id: 'selected', kind: 'inspect', context: 'worker', dependsOn: ['inspect'] },
+          { id: 'skipped', kind: 'inspect', context: 'worker' }] }));
       assert.ok(one.client.supports('workflow/plan'));
-      assert.equal(one.client.supports('workflow/start'), false);
+      assert.ok(one.client.supports('workflow/start'));
+      const methods = Object.keys(hostRequestSchemas);
+      const featureFlags = new Set(['request-cancellation', 'workflow/nodeSelection', 'workflow/historyPolicy',
+        'operations/artifacts/timestampText', 'tooling/progress', 'tooling/fixProgress']);
+      assert.deepEqual(methods.filter(method => method !== 'initialize').sort(),
+        one.info.capabilities.filter(capability => !featureFlags.has(capability)).sort());
+      assert.ok(await one.client.invoke('toolchains/discover', {}));
+      const profile = path.join(workspace, 'saved profile');
+      await mkdir(profile);
+      await writeFile(path.join(profile, 'raw.txt'), 'saved trace');
+      await writeFile(path.join(profile, 'capture.results.json'), JSON.stringify({
+        captureId: 'capture', backend: 'fixture', mode: 'cpu', eventSource: 'test', rawTrace: 'raw.txt',
+      }));
+      const analyzed = await one.client.invoke('profile/analyze', { runDirectory: profile });
+      assert.deepEqual(analyzed, { schemaVersion: 1, runDirectory: profile, analysisFile: path.join(profile, 'analysis.json') });
+      await access(analyzed.analysisFile);
+      assert.throws(() => parseHostRequest('history/retryIndex', { workflow: 'wrong' }), /operationId is required/);
+      assert.deepEqual(parseHostRequest('toolchains/discover', JSON.parse(hostRequestExample('toolchains/discover'))), {});
       const planned = await one.client.planWorkflow(manifest);
       assert.equal(planned.nodes[0].id, 'inspect');
+      const request = { clientRequestId: randomUUID(), manifest, manifestSha256: planned.manifestHash,
+        jobs: 1, resultsDirectory: path.join(workspace, 'selected run'), only: ['selected'],
+        historyPolicy: { mode: 'Default' as const } };
+      const preflight = await one.client.preflightWorkflow({ manifest, manifestSha256: planned.manifestHash,
+        jobs: request.jobs, resultsDirectory: request.resultsDirectory, only: request.only, historyPolicy: request.historyPolicy });
+      assert.equal(preflight.plan.valid, true);
+      assert.deepEqual(preflight.only, request.only);
+      assert.deepEqual(preflight.historyPolicy, request.historyPolicy);
+      assert.deepEqual(preflight.plan.nodes.map(node => node.id), ['inspect', 'selected']);
+      const operation = await one.client.startWorkflow(request);
+      assert.equal((await one.client.startWorkflow({ ...request, only: ['selected', 'selected'] })).operationId,
+        operation.operationId);
+      await assert.rejects(one.client.startWorkflow({ ...request, only: ['skipped'] }), /request_id_conflict/);
+      const observer = await HostClient.connect(endpoint, workspace);
+      try {
+        assert.equal((await observer.client.findOperation(request.clientRequestId)).operationId, operation.operationId);
+        assert.equal((await observer.client.listOperations()).items[0].operationId, operation.operationId);
+        const deadline = Date.now() + 8000;
+        for (;;) {
+          const state = (await observer.client.getOperation(operation.operationId)).state;
+          if (state === 'succeeded') { break; }
+          assert.ok(['accepted_not_dispatched', 'dispatch_authorized'].includes(state) && Date.now() < deadline, state);
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const database = path.join(workspace, '.cmakeworkflow', 'history.sqlite');
+        for (;;) {
+          const indexing = await observer.client.historyIndexStatus(operation.operationId);
+          if (indexing.state === 'indexed') { assert.equal(indexing.databasePath, database); break; }
+          assert.ok(['pending', 'indexing'].includes(indexing.state) && Date.now() < deadline, indexing.diagnosticCode ?? indexing.state);
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        assert.equal((await observer.client.retryHistoryIndex(operation.operationId)).state, 'indexed');
+        const { items, nextCursor } = await observer.client.historyRunsPage({ databasePath: database, limit: 1, status: 'succeeded' });
+        assert.equal(nextCursor, null);
+        assert.equal(items[0].directory, request.resultsDirectory);
+        assert.equal((await observer.client.historyShow(database, items[0].id)).run.id, items[0].id);
+        assert.equal((await observer.client.historyImport(database, request.resultsDirectory, false)).unchanged, 1);
+        assert.ok(Array.isArray(await observer.client.historyCompare({ databasePath: database,
+          baselineRunId: items[0].id, candidateRunId: items[0].id })));
+        const overview = await observer.client.operationOverview(operation.operationId);
+        assert.equal(overview.isFinalized, true);
+        assert.deepEqual(overview.nodes.map(node => [node.id, node.status]),
+          [['inspect', 'succeeded'], ['selected', 'succeeded']]);
+        const verified = await observer.client.operationReport(operation.operationId);
+        assert.deepEqual(verified.report.nodes.map(node => node.id), ['inspect', 'selected']);
+        const catalog = await observer.client.listOperationArtifacts(operation.operationId);
+        const reportArtifact = catalog.find(item => item.relativePath === 'run.json')!;
+        assert.ok(BigInt(reportArtifact.lastWriteUtcTicksText) > BigInt(Number.MAX_SAFE_INTEGER));
+        const downloaded = path.join(workspace, 'downloaded-report.json');
+        await downloadOperationArtifact(downloaded, reportArtifact, offset =>
+          observer.client.readOperationArtifactChunk(operation.operationId, reportArtifact, offset));
+        assert.equal(createHash('sha256').update(await readFile(downloaded)).digest('hex'), verified.revision.toLowerCase());
+      } finally { observer.client.dispose(); }
       assert.equal((await one.client.inspectContext(path.join(workspace, 'not built'))).state, 'Unknown');
       await assert.rejects(two.client.planWorkflow(manifest), /outside the initialized workspace/);
       const runDirectory = path.join(workspace, 'saved run'); await mkdir(runDirectory);

@@ -37,6 +37,10 @@
         "icon": "$(play)"
       },
       {
+        "command": "cmakeWorkflow.runWorkflowCli",
+        "title": "CMakeWorkflow: Run Workflow with Standalone CLI"
+      },
+      {
         "command": "cmakeWorkflow.runNode",
         "title": "CMakeWorkflow: Run Node and Dependencies",
         "icon": "$(play)"
@@ -93,8 +97,13 @@
       },
       {
         "command": "cmakeWorkflow.openProfileResults",
-        "title": "CMakeWorkflow: Open Profile Results",
+        "title": "CMakeWorkflow: Saved Profiles",
         "icon": "$(pulse)"
+      },
+      {
+        "command": "cmakeWorkflow.openExistingProfile",
+        "title": "CMakeWorkflow: Open Existing Profile…",
+        "icon": "$(folder-opened)"
       },
       {
         "command": "cmakeWorkflow.historyDetails",
@@ -271,6 +280,94 @@
         "command": "cmakeWorkflow.hostFix",
         "title": "CMakeWorkflow: Fix Tools (Host)",
         "icon": "$(wrench)"
+      },
+      {
+        "command": "cmakeWorkflow.runDurableWorkflow",
+        "title": "CMakeWorkflow: Run Workflow via Host (Durable)",
+        "icon": "$(run)"
+      },
+      {
+        "command": "cmakeWorkflow.runSelectedNodesViaHost",
+        "title": "CMakeWorkflow: Run Selected Nodes via Host",
+        "icon": "$(run)"
+      },
+      {
+        "command": "cmakeWorkflow.inspectDurableWorkflow",
+        "title": "CMakeWorkflow: Inspect Last Host Operation",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "cmakeWorkflow.cancelDurableWorkflow",
+        "title": "CMakeWorkflow: Request Host Operation Cancellation",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "cmakeWorkflow.refreshDurableOperations",
+        "title": "CMakeWorkflow: Refresh Host Operations",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "cmakeWorkflow.loadMoreDurableOperations",
+        "title": "CMakeWorkflow: Load More Host Operations"
+      },
+      {
+        "command": "cmakeWorkflow.openPlannedNode",
+        "title": "CMakeWorkflow: Open Planned Node Details"
+      },
+      {
+        "command": "cmakeWorkflow.openOperationNode",
+        "title": "CMakeWorkflow: Open Node Details",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "cmakeWorkflow.openOperationEvents",
+        "title": "CMakeWorkflow: Open Raw Events",
+        "icon": "$(output)"
+      },
+      {
+        "command": "cmakeWorkflow.openDurableOperation",
+        "title": "CMakeWorkflow: Inspect Host Operation",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "cmakeWorkflow.followDurableOperation",
+        "title": "CMakeWorkflow: Follow Host Operation",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "cmakeWorkflow.cancelDurableOperationItem",
+        "title": "CMakeWorkflow: Cancel Selected Host Operation",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "cmakeWorkflow.downloadDurableArtifact",
+        "title": "CMakeWorkflow: Download Host Artifact",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "cmakeWorkflow.openHostApi",
+        "title": "CMakeWorkflow: Open Host API",
+        "icon": "$(symbol-method)"
+      },
+      {
+        "command": "cmakeWorkflow.openOperationHistory",
+        "title": "CMakeWorkflow: Open Operation History",
+        "icon": "$(book)"
+      },
+      {
+        "command": "cmakeWorkflow.retryHistoryIndex",
+        "title": "CMakeWorkflow: Retry History Indexing",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "cmakeWorkflow.recoverDurableOperation",
+        "title": "CMakeWorkflow: Recover Host Operation",
+        "icon": "$(history)"
+      },
+      {
+        "command": "cmakeWorkflow.stopDurableHost",
+        "title": "CMakeWorkflow: Stop Durable Host",
+        "icon": "$(primitive-square)"
       }
     ],
     "viewsContainers": {
@@ -291,6 +388,10 @@
         {
           "id": "cmakeWorkflow.history",
           "name": "History & Comparison"
+        },
+        {
+          "id": "cmakeWorkflow.operations",
+          "name": "Host Operations"
         }
       ]
     },
@@ -302,10 +403,29 @@
       {
         "view": "cmakeWorkflow.history",
         "contents": "Load indexed runs, then select a baseline and candidate.\n[Refresh History](command:cmakeWorkflow.showHistory)"
+      },
+      {
+        "view": "cmakeWorkflow.operations",
+        "contents": "Run a durable workflow or inspect previously recorded operations.\n[Run via Host](command:cmakeWorkflow.runDurableWorkflow)\n[Refresh Operations](command:cmakeWorkflow.refreshDurableOperations)\n[Browse Host API](command:cmakeWorkflow.openHostApi)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "cmakeWorkflow.openHostApi",
+          "when": "view == cmakeWorkflow.operations",
+          "group": "navigation@2"
+        },
+        {
+          "command": "cmakeWorkflow.runWorkflow",
+          "when": "view == cmakeWorkflow.operations",
+          "group": "navigation@3"
+        },
+        {
+          "command": "cmakeWorkflow.refreshDurableOperations",
+          "when": "view == cmakeWorkflow.operations",
+          "group": "navigation@1"
+        },
         {
           "command": "cmakeWorkflow.selectWorkflow",
           "when": "view == cmakeWorkflow.workflows",
@@ -349,17 +469,17 @@
         {
           "command": "cmakeWorkflow.historyTrend",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@2.5"
+          "group": "analysis@3"
         },
         {
           "command": "cmakeWorkflow.selectHistoryWorkspace",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@1.5"
+          "group": "catalog@1"
         },
         {
           "command": "cmakeWorkflow.chooseHistoryDb",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@1.6"
+          "group": "catalog@2"
         },
         {
           "command": "cmakeWorkflow.compareHistory",
@@ -374,32 +494,27 @@
         {
           "command": "cmakeWorkflow.compareDagFlowHarness",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@4"
+          "group": "analysis@1"
         },
         {
           "command": "cmakeWorkflow.selectChartPreset",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@5"
+          "group": "charts@1"
         },
         {
           "command": "cmakeWorkflow.createChartPreset",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@6"
+          "group": "charts@2"
         },
         {
           "command": "cmakeWorkflow.filterHistory",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@1.7"
+          "group": "catalog@3"
         },
         {
           "command": "cmakeWorkflow.importHistory",
           "when": "view == cmakeWorkflow.history",
-          "group": "navigation@1.8"
-        },
-        {
-          "command": "cmakeWorkflow.openProfileResults",
-          "when": "view == cmakeWorkflow.history",
-          "group": "navigation@7"
+          "group": "catalog@4"
         },
         {
           "command": "cmakeWorkflow.toolingDoctor",
@@ -417,24 +532,9 @@
           "group": "navigation@9"
         },
         {
-          "command": "cmakeWorkflow.profileRun",
+          "submenu": "cmakeWorkflow.profilesMenu",
           "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
-          "group": "profiling@1"
-        },
-        {
-          "command": "cmakeWorkflow.profileReplay",
-          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
-          "group": "profiling@2"
-        },
-        {
-          "command": "cmakeWorkflow.profileAnalyze",
-          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
-          "group": "profiling@3"
-        },
-        {
-          "command": "cmakeWorkflow.profileVariants",
-          "when": "view == cmakeWorkflow.history || view == cmakeWorkflow.workflows",
-          "group": "profiling@10"
+          "group": "actions@4"
         },
         {
           "submenu": "cmakeWorkflow.targetsMenu",
@@ -457,6 +557,16 @@
           "group": "workflows@10"
         },
         {
+          "command": "cmakeWorkflow.inspectDurableWorkflow",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "workflows@11"
+        },
+        {
+          "command": "cmakeWorkflow.cancelDurableWorkflow",
+          "when": "view == cmakeWorkflow.workflows",
+          "group": "workflows@12"
+        },
+        {
           "command": "cmakeWorkflow.setHistoryLimit",
           "when": "view == cmakeWorkflow.history",
           "group": "history@10"
@@ -474,6 +584,26 @@
       ],
       "view/item/context": [
         {
+          "command": "cmakeWorkflow.openPlannedNode",
+          "when": "view == cmakeWorkflow.workflows && viewItem == cmakeWorkflowNode",
+          "group": "details@1"
+        },
+        {
+          "command": "cmakeWorkflow.openOperationNode",
+          "when": "view == cmakeWorkflow.operations && (viewItem == cmakeWorkflowOperationNode || viewItem == cmakeWorkflowFinalizedNode)",
+          "group": "inline@1"
+        },
+        {
+          "command": "cmakeWorkflow.downloadDurableArtifact",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowFinalizedNode",
+          "group": "artifacts@1"
+        },
+        {
+          "command": "cmakeWorkflow.openOperationEvents",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowDurableOperation",
+          "group": "diagnostics@1"
+        },
+        {
           "command": "cmakeWorkflow.runNode",
           "when": "view == cmakeWorkflow.workflows && viewItem == cmakeWorkflowNode",
           "group": "inline@1"
@@ -487,7 +617,50 @@
           "command": "cmakeWorkflow.setCandidate",
           "when": "view == cmakeWorkflow.history && viewItem == cmakeWorkflowHistoryRun",
           "group": "inline@2"
+        },
+        {
+          "command": "cmakeWorkflow.openDurableOperation",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowDurableOperation",
+          "group": "inline@1"
+        },
+        {
+          "command": "cmakeWorkflow.followDurableOperation",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowDurableOperation",
+          "group": "inline@2"
+        },
+        {
+          "command": "cmakeWorkflow.cancelDurableOperationItem",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowDurableOperation",
+          "group": "navigation@1"
+        },
+        {
+          "command": "cmakeWorkflow.openOperationHistory",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowHistoryIndexed",
+          "group": "inline@1"
+        },
+        {
+          "command": "cmakeWorkflow.retryHistoryIndex",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowHistoryRetryable",
+          "group": "inline@1"
+        },
+        {
+          "command": "cmakeWorkflow.recoverDurableOperation",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowDurableOperation",
+          "group": "navigation@2"
+        },
+        {
+          "command": "cmakeWorkflow.downloadDurableArtifact",
+          "when": "view == cmakeWorkflow.operations && viewItem == cmakeWorkflowDurableOperation",
+          "group": "artifacts@1"
         }
+      ],
+      "cmakeWorkflow.profilesMenu": [
+        { "command": "cmakeWorkflow.openProfileResults", "group": "1_saved@1" },
+        { "command": "cmakeWorkflow.profileAnalyze", "group": "1_saved@2" },
+        { "command": "cmakeWorkflow.openExistingProfile", "group": "1_saved@3" },
+        { "command": "cmakeWorkflow.profileRun", "group": "2_capture@1" },
+        { "command": "cmakeWorkflow.profileReplay", "group": "2_capture@2" },
+        { "command": "cmakeWorkflow.profileVariants", "group": "2_capture@3" }
       ],
       "cmakeWorkflow.targetsMenu": [
         {
@@ -593,7 +766,7 @@
         "cmakeWorkflow.resultsDir": {
           "type": "string",
           "scope": "resource",
-          "description": "Optional --results-dir for workflow run, interpreted by the CLI in the workspace folder."
+          "description": "Optional results directory for workflow runs and the default output for profiling. Relative paths resolve from the workspace folder."
         },
         "cmakeWorkflow.chartPresets": {
           "type": "array",
@@ -687,6 +860,10 @@
       }
     },
     "submenus": [
+      {
+        "id": "cmakeWorkflow.profilesMenu",
+        "label": "Profiles"
+      },
       {
         "id": "cmakeWorkflow.targetsMenu",
         "label": "CMake Targets"

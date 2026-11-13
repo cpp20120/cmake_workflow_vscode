@@ -1,12 +1,21 @@
 // DTOs for the Host-owned durable workflow operation API (protocol v1).
-import { parseEvent, type Event } from './protocol';
+import { parseEvent, parsePlan, type Event, type Plan } from './protocol';
 
-export interface WorkflowStartRequest {
-  clientRequestId: string;
+import { parseHistoryPolicy, type HistoryPolicy } from './historyProtocol';
+
+export interface WorkflowPreflightRequest {
+  historyPolicy?: HistoryPolicy;
+  only?: readonly string[];
   manifest: string;
   manifestSha256: string;
   jobs: number;
   resultsDirectory: string;
+}
+export interface WorkflowStartRequest extends WorkflowPreflightRequest {
+  clientRequestId: string;
+}
+export interface WorkflowPreflight extends WorkflowPreflightRequest {
+  plan: Plan;
 }
 export interface OperationReference {
   workspaceId: string;
@@ -16,6 +25,28 @@ export interface OperationReference {
   state: string;
   manifestSha256: string;
   manifestBaseDirectory: string;
+}
+export interface OperationPage {
+  schemaVersion: 1;
+  items: OperationReference[];
+  nextCursor: string | null;
+}
+export interface OperationArtifact {
+  artifactId: string;
+  nodeId?: string | null;
+  relativePath: string;
+  kind: string;
+  size: number;
+  sha256: string;
+  lastWriteUtcTicksText: string;
+}
+export interface OperationArtifactChunk {
+  artifactId: string;
+  offset: number;
+  totalSize: number;
+  lastWriteUtcTicksText: string;
+  content: Buffer;
+  eof: boolean;
 }
 export interface RecoveryInspection {
   operationId: string;
@@ -50,11 +81,50 @@ function string(input: unknown): input is string { return typeof input === 'stri
 function optional(input: unknown): input is string | null { return input === null || string(input); }
 function integer(input: unknown): input is number { return Number.isSafeInteger(input) && (input as number) >= 0; }
 function hash(input: unknown): input is string { return string(input) && /^[a-f\d]{64}$/i.test(input); }
+export function parseWorkflowPreflight(input: unknown): WorkflowPreflight {
+  const v = record(input);
+  const { manifest, manifestSha256, jobs, resultsDirectory, only } = v;
+  if (!string(manifest) || !hash(manifestSha256) || !integer(jobs) || jobs === 0
+    || !string(resultsDirectory) || (only !== null && only !== undefined
+      && (!Array.isArray(only) || !only.every(id => string(id) && !!id.trim())))) {
+    throw Error('Invalid workflow preflight');
+  }
+  const plan = parsePlan({ ...v, workflow: manifest, manifestHash: manifestSha256 });
+  return { manifest, manifestSha256, jobs, resultsDirectory, only: only ?? undefined, historyPolicy: parseHistoryPolicy(v.historyPolicy), plan };
+}
 export function parseOperationReference(input: unknown): OperationReference {
   const v = record(input);
   if (![v.workspaceId, v.operationId, v.clientRequestId, v.kind, v.state, v.manifestBaseDirectory].every(string)
     || !v.operationId || !v.clientRequestId || !hash(v.manifestSha256)) { throw Error('Invalid operation reference'); }
   return v as unknown as OperationReference;
+}
+export function parseOperationPage(input: unknown): OperationPage {
+  const v = record(input);
+  if (v.schemaVersion !== 1 || !Array.isArray(v.items) || v.items.length > 200 || !optional(v.nextCursor)) {
+    throw Error('Invalid Host operations page');
+  }
+  return { schemaVersion: 1, items: v.items.map(parseOperationReference), nextCursor: v.nextCursor };
+}
+function timestamp(value: unknown): value is string { return string(value) && /^\d{1,19}$/.test(value); }
+export function parseOperationArtifacts(input: unknown, operationId: string): OperationArtifact[] {
+  const v = record(input);
+  if (v.operationId !== operationId || !hash(v.reportSha256) || !Array.isArray(v.artifacts) || v.artifacts.length > 512) {
+    throw Error('Invalid Host artifact catalog');
+  }
+  return v.artifacts.map(value => {
+    const { artifactId, nodeId, relativePath, kind, size, sha256, lastWriteUtcTicksText } = record(value);
+    if (!string(artifactId) || !artifactId || !string(relativePath) || !relativePath || !string(kind)
+      || (nodeId !== undefined && !optional(nodeId)) || !integer(size) || !hash(sha256) || !timestamp(lastWriteUtcTicksText)) { throw Error('Invalid Host artifact'); }
+    return { artifactId, nodeId, relativePath, kind, size, sha256, lastWriteUtcTicksText };
+  });
+}
+export function parseOperationArtifactChunk(input: unknown): OperationArtifactChunk {
+  const { artifactId, offset, totalSize, lastWriteUtcTicksText, content, eof } = record(input);
+  if (!string(artifactId) || !integer(offset) || !integer(totalSize) || !timestamp(lastWriteUtcTicksText)
+    || !string(content) || content.length > 87384 || typeof eof !== 'boolean') { throw Error('Invalid Host artifact chunk'); }
+  const bytes = Buffer.from(content, 'base64');
+  if (bytes.length > 65536 || bytes.toString('base64') !== content) { throw Error('Invalid Host artifact bytes'); }
+  return { artifactId, offset, totalSize, lastWriteUtcTicksText, content: bytes, eof };
 }
 export function parseRecoveryInspection(input: unknown): RecoveryInspection {
   const v = record(input);
