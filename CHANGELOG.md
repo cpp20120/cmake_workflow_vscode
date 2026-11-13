@@ -6,6 +6,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- Added a typed Host API browser and durable workflow launch with per-run History policy.
+- Host Operations shows node details, verified artifacts, and History indexing status and retry.
+- History uses Host RPC for browsing, comparison, and regression detection, and explains empty results.
+- The Profiles menu lists saved runs, opens existing folders, and analyzes captures through Host RPC.
+
 - Host Fix: reviewed single-use plans, serialized installation, progress and
   post-install verification, plus workspace-scoped tool PATH activation.
 

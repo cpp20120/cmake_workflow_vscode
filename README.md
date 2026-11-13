@@ -12,16 +12,15 @@ Open the **CMakeWorkflow** icon in the Activity Bar. Its toolbar has buttons to 
 
 ## Chart presets and DagFlow harness results
 
-The History toolbar provides **Select Chart Preset** and **Create Chart Preset**. Presets filter chart metric names and optional case/scenario name fragments. The built-in choices cover all CLI history measurements, process time, all DagFlow metrics, public API throughput, runtime throughput, graph/scheduler cases, and latency. The selected preset is remembered separately for CLI history and DagFlow harness charts in each workspace folder. Presets filter presentation only; the CLI comparison table and its verdict remain complete. Custom presets are saved in that folder's `cmakeWorkflow.chartPresets` setting. Use Settings JSON to edit or remove them. Metric names must match exactly; case fragments are case insensitive. `*` selects all metrics.
+The **History & Comparison → …** menu provides **Select Chart Preset** and **Create Chart Preset**. Presets filter chart metric names and optional case/scenario name fragments. The built-in choices cover all CLI history measurements, process time, all DagFlow metrics, public API throughput, runtime throughput, graph/scheduler cases, and latency. The selected preset is remembered separately for CLI history and DagFlow harness charts in each workspace folder. Presets filter presentation only; the Host comparison table and its verdict retain their full scope. Custom presets are saved in that folder's `cmakeWorkflow.chartPresets` setting. Use Settings JSON to edit or remove them. Metric names must match exactly; case fragments are case insensitive. `*` selects all metrics.
 
-For DagFlow's `invoke` campaigns, choose **Compare DagFlow Harness Results** in the same toolbar. Select the baseline and candidate `summary.json` files from saved `harness-results` directories. The extension reads each adjacent `runs.jsonl`, plots successful non-warmup samples, and shows the scaled medians recorded by the harness. It never calls these plots a statistical regression verdict. Missing files, malformed records and manifest hash mismatches are reported. You can compare two saved harness result directories without importing them into CLI history. For the existing DagFlow campaign, files are typically under `out/build/runtime-campaign/harness-results/Release/`; select the actual files because the extension does not infer result paths from workflow runs.
+For DagFlow's `invoke` campaigns, choose **Compare DagFlow Harness Results** in the same menu. Select the baseline and candidate `summary.json` files from saved `harness-results` directories. The extension reads each adjacent `runs.jsonl`, plots successful non-warmup samples, and shows the scaled medians recorded by the harness. It never calls these plots a statistical regression verdict. Missing files, malformed records and manifest hash mismatches are reported. You can compare two saved harness result directories without importing them into CLI history. For the existing DagFlow campaign, files are typically under `out/build/runtime-campaign/harness-results/Release/`; select the actual files because the extension does not infer result paths from workflow runs.
 
-## More CLI tools in the UI
+## Workflow and History actions
 
 - Expand a planned workflow and use the play button beside a node to review its dependency closure and submit it to the Host.
 - In **History & Comparison**, use **Filter History** for status, start/end time, workflow text, or variant. **Import Saved Results** calls `history/import` on a selected directory, optionally recursively. Run details now show recorded host and build environments alongside charts and artifacts.
 - In the Workflow toolbar, **Check Tools** lists CLI profiles and runs the read-only `tooling doctor --profile NAME --json`. **Inspect Build Tree** displays the Host's observed state, diagnostics and File API targets. **Resolve Executable Target** asks the Host for the executable path without building.
-- In the History toolbar, **Open Profile Results** opens a saved profile directory. It displays timing comparisons, counters, capture details and available trace/report links from existing `comparison.json`, `counter-comparison.json`, `analysis.json` and `*.results.json` files. Opening the view does not rerun profiling or analysis.
 
 ## Manual profiling
 
@@ -30,7 +29,8 @@ Open **… → Profiles** in either **Workflow** or **History & Comparison**.
 configured `cmakeWorkflow.resultsDir`, standard folders under `out` and
 output locations previously used by the extension. **Open Existing Profile…**
 opens a saved run folder by path. Select the individual folder containing
-`analysis.json` or `*.results.json`.
+`analysis.json` or `*.results.json`. The viewer shows saved timing comparisons,
+counters, captures and links to available traces and reports.
 
 - **CMakeWorkflow: Run Profile** — choose a configured build tree, an executable
   target/configuration observed by CMake File API, capture mode, timing repeats,
@@ -52,9 +52,8 @@ opens a saved run folder by path. Select the individual folder containing
   directory. A statistical regression is not required for a manual replay.
   The CLI checks original arguments, binary hashes, saved harness replay
   descriptors and provenance; an offered case is not a guarantee of replayability.
-  Replay requires the CLI implementation of `profile replay`, currently in the
-  local CLI patches. Older executables reject that command. Missing snapshots
-  or changed binaries are reported through the CLI diagnostics.
+  Use a runner build that supports `profile replay`. The CLI reports missing
+  snapshots and changed binaries in its diagnostics.
 - **CMakeWorkflow: Analyze Saved Profile** — select a run with saved captures
   from the list, or browse to its folder. The Host regenerates analysis files
   and opens the result from the saved captures. The run folder must be inside
@@ -68,10 +67,9 @@ permissions must already be available; profiling does not install them implicitl
 
 Progress notifications support cancellation with the same process cancellation
 policy as workflow runs. Errors and live CLI output go to **CMakeWorkflow** output.
-Only a successful command opens the result viewer; canceled or failed commands
-may leave partial artifacts. Since these CLI commands currently have no JSON
-completion protocol, the extension reads their explicit `Profile analysis:` and
-`Profile replay:` completion paths and never guesses a generated run directory.
+Run and Replay read the CLI completion paths. Analyze uses the typed
+`profile/analyze` response. Canceled or failed captures may leave partial artifacts
+that can be inspected from **Saved Profiles**.
 
 ## Targets, tool installation and campaigns
 
@@ -116,7 +114,7 @@ CLI. No campaign or installation starts automatically.
 - **Set History Run Limit** changes workspace setting `cmakeWorkflow.historyLimit`
   (default 50). It also controls the pool used for automatic baseline selection.
 - **Toggle History Recording** changes `cmakeWorkflow.noHistory` (default false).
-  **Disabled** is offered first in the Host launch picker. Standalone workflow
+  When recording is disabled, the Host launch picker offers **Disabled** first. Standalone workflow
   and profile commands use `--no-history` when recording is disabled.
 - **Inspect Run Measurements** calls `history/metrics` with selected run, metric,
   variant and scenario, and displays the Host's raw measurements. Large tables
@@ -132,7 +130,7 @@ CLI. No campaign or installation starts automatically.
 
 - **Show Workflow Graph** in the Workflow toolbar draws the Host's dependency edges and node diagnostics. An invalid plan is still shown, so its errors can be inspected.
 - Open an indexed workflow run in History to see an execution timeline, dependency graph and failed/blocked/canceled nodes. The extension loads the saved report through `runs/get`; the failure section links to indexed stdout and stderr logs. If the report is unavailable, indexed run details remain visible.
-- **Show History Trend** asks for an exact metric name, calls `history/query` and plots raw samples from the current History run list in time order. It separates units, variants, scenarios and methods; it does not calculate a trend statistic or regression verdict.
+- **Show History Trend** calls `history/query` and plots raw samples from the selected run or the current History list in time order. It separates units, variants, scenarios and methods; it does not calculate a trend statistic or regression verdict.
 - The History comparison view highlights differing recorded host and build-environment fields beside the Host's comparison status. Highlighting describes a difference; it does not override the Host's comparability decision.
 - The DagFlow harness comparison has a case-by-metric matrix colored by the direction and size of the difference between saved medians. Clicking a cell jumps to its raw sample chart. The matrix explicitly reports when the selected results have no common case/metric pairs. Color never implies a statistical verdict or that a larger value is better.
 
@@ -141,15 +139,15 @@ CLI. No campaign or installation starts automatically.
 Run comparisons now provide a full-range raw-sample plot, an optional p10–p90
 focus view (with explicit counts of points outside its range) and a full-range
 ECDF. Saved workflow reports also provide a logarithmic *duration breakdown*;
-that view is not a concurrency timeline. These charts are descriptive: the CLI
-remains authoritative for comparable measurements and statistical verdicts.
+that view is not a concurrency timeline. These charts describe the samples. The Host supplies comparability decisions
+and statistical verdicts for History comparisons.
 
-For workflows with explicitly declared `harnessDirectory` (supported by the
-corresponding CLI patch), the CLI snapshots DagFlow harness outputs and imports
-them into History; no build-tree scanning is performed by the VS Code extension.
-See the CLI README for the required fresh-output-directory contract.
+For workflows with explicitly declared `harnessDirectory`, CMakeWorkflow
+snapshots DagFlow harness outputs for History import. See the runner’s
+[profiling and campaigns guide](https://github.com/cpp20120/CMakeWorkflow/blob/main/docs/en/profiling-and-campaigns.md)
+for the fresh-output-directory contract.
 
-On Linux and macOS, Cancel first sends SIGINT to CMakeWorkflow so that it can
+For standalone CLI processes on Linux and macOS, Cancel first sends SIGINT to CMakeWorkflow so that it can
 persist `canceled` state and clean up subprocesses, with a process-group kill
 fallback after five seconds. On Windows the extension calls `taskkill /T /F` to
 terminate descendants; this is forced termination and may leave the saved report
@@ -161,7 +159,8 @@ incomplete. An incomplete report must never be displayed as a successful run.
 tests. Process tests use mocked children; command wizard tests drive a mocked
 VS Code UI, including trust, cancellation, variant selection, installation
 consent, argument arrays and menu contributions. They do not install tools or
-require a CMakeWorkflow binary. `npm run package` produces the production
+require a CMakeWorkflow binary. Set `CMAKEWORKFLOW_HOST_TEST_BINARY` to an absolute path to run the real Host
+integration test. `npm run package` produces the production
 JavaScript bundle; it does not itself create a VSIX.
 
 For an integration check, use a temporary configured CMake project with File
@@ -208,7 +207,8 @@ request is not proof that subprocesses have stopped. Workspace trust is required
 Click an operation for its summary, then expand it to see node states.
 Click a node for dependencies, timing, exit status and diagnostics. Finalized
 nodes offer **Download Host Artifact** in their context menu. **Open Raw Events**
-in the operation context menu opens a separate tab for debugging.
+in the operation context menu opens a separate debugging tab with up to
+2,000 events.
 
 If **History & Comparison** shows zero runs, expand **Runs (0)** to see
 whether the database is missing, filters exclude the results, or the latest
@@ -235,8 +235,8 @@ use the Host. On a Host that advertises `workflow/historyPolicy`, choose **Defau
 view shows History indexing separately from workflow state. **Retry History
 Indexing** invokes `history/retryIndex` for the selected operation. History
 listing, filters, import, metrics, trends, comparison, and regression detection
-use Host RPC. **Run Workflow with Standalone CLI** retains the legacy workflow
-execution command. Closing VS Code
+use Host RPC. The run list uses `history/runsPage` when advertised.
+**Run Workflow with Standalone CLI** runs the standalone workflow command. Closing VS Code
 or **Stop Durable Host** interrupts an extension-owned Host and may leave an
 operation needing manual reconciliation. For long unattended runs, configure an
 externally managed Host using `cmakeWorkflow.hostEndpoint`. Existing Host Doctor
